@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -687,4 +687,61 @@ test('docker save images: every layer, deleted files, env and history are scanne
   assert.ok(!byRule.some((x) => x.includes('etc/ssl')), 'CA paths are not findings');
   const clean = build('shipsafe-probe:clean', 'FROM scratch\nCOPY app/index.js /app/index.js\n');
   assert.equal(check(clean).code, 0);
+});
+
+function pyProject(name, files, extraToml = '') {
+  const dir = join(root, name);
+  const pkg = name.replace(/-/g, '_');
+  mkdirSync(join(dir, 'src', pkg), { recursive: true });
+  writeFileSync(join(dir, 'pyproject.toml'), `[project]\nname = "${name}"\nversion = "0.1.0"\n[project.scripts]\n${name} = "${pkg}:main"\n[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n${extraToml}`);
+  writeFileSync(join(dir, 'src', pkg, '__init__.py'), 'def main():\n    pass\n');
+  for (const [p, c] of Object.entries(files)) { mkdirSync(dirname(join(dir, p)), { recursive: true }); writeFileSync(join(dir, p), c); }
+  const r = spawnSync('uv', ['build', '-q', '--out-dir', join(dir, 'dist')], { cwd: dir, encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  const out = readdirSync(join(dir, 'dist'));
+  return { dir, wheel: join(dir, 'dist', out.find((f) => f.endsWith('.whl'))), sdist: join(dir, 'dist', out.find((f) => f.endsWith('.tar.gz'))) };
+}
+
+test('Python wheels and sdists: leak rules, RECORD, entry points and pyproject config', (t) => {
+  const leaky = pyProject('py-leaky', { '.env': 'SECRET=1\n', 'src/py_leaky/app.js.map': '{}', 'src/py_leaky/native.pdb': 'pdb', 'src/py_leaky/tests/test_x.py': 'x\n' });
+  if (!leaky) { t.skip('uv build is not available'); return; }
+  const w = check(leaky.wheel);
+  assert.equal(w.code, 1);
+  assert.equal(w.report.kind, 'wheel');
+  assert.deepEqual(rules(w.report), ['native-debug-info', 'source-map']);
+  assert.match(w.report.warnings.join('\n'), /test module py_leaky\/tests\/test_x\.py/);
+  const sd = check(leaky.sdist);
+  assert.equal(sd.report.kind, 'sdist');
+  assert.ok(rules(sd.report).includes('sensitive-file'), JSON.stringify(sd.report.findings));
+  const allowed = pyProject('py-allowed', { 'src/py_allowed/app.js.map': '{}' }, '[tool.shipsafe]\nallow = [\n  { rule = "source-map", path = "py_allowed/*.map", reason = "map for the bundled widget, reviewed" },\n]\n');
+  assert.equal(check(allowed.wheel).code, 0, JSON.stringify(check(allowed.wheel).report));
+  const clean = pyProject('py-clean', {});
+  const c = check(clean.wheel);
+  assert.equal(c.code, 0, JSON.stringify(c.report.findings));
+  const tampered = join(root, 'py_clean-0.1.0-tampered-py3-none-any.whl');
+  const dir = join(root, 'tamper');
+  mkdirSync(dir, { recursive: true });
+  execFileSync('unzip', ['-qo', clean.wheel, '-d', dir]);
+  writeFileSync(join(dir, 'py_clean/__init__.py'), 'def main():\n    return 1\n');
+  writeFileSync(join(dir, 'py_clean-0.1.0.dist-info/entry_points.txt'), '[console_scripts]\ngone = py_clean.missing:main\n');
+  execFileSync('zip', ['-qr', tampered, '.'], { cwd: dir });
+  const bad = check(tampered);
+  assert.deepEqual(rules(bad.report), ['entry-point', 'wheel-record']);
+  assert.match(bad.report.warnings.join('\n'), /no pyproject\.toml whose \[project\]\.name matches/);
+});
+
+test('Rust crates: packed Cargo.toml config and swept directories', (t) => {
+  const dir = join(root, 'rs-probe');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  mkdirSync(join(dir, '.venv/lib'), { recursive: true });
+  writeFileSync(join(dir, 'Cargo.toml'), '[package]\nname = "rs-probe"\nversion = "0.1.0"\nedition = "2021"\ndescription = "x"\nlicense = "MIT"\ninclude = ["src/**", ".venv/**", "Cargo.toml"]\n[package.metadata.shipsafe]\nmaxFileBytes = 100\n');
+  writeFileSync(join(dir, 'src/main.rs'), `fn main() { let _k = "${'AK' + 'IA' + 'B'.repeat(16)}"; }\n${'// pad\n'.repeat(30)}`);
+  writeFileSync(join(dir, '.venv/lib/x.py'), 'x\n');
+  const r = spawnSync('cargo', ['package', '--allow-dirty', '--no-verify', '-q'], { cwd: dir, encoding: 'utf8' });
+  if (r.status !== 0) { t.skip(`cargo package failed: ${r.stderr.slice(0, 200)}`); return; }
+  const crate = join(dir, 'target/package/rs-probe-0.1.0.crate');
+  const c = check(crate);
+  assert.equal(c.report.kind, 'crate');
+  assert.equal(c.report.package, 'rs-probe@0.1.0 (crate)');
+  assert.deepEqual(rules(c.report), ['file-size', 'secret-token', 'vcs-dir']);
 });

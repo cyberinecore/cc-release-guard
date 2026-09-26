@@ -43,6 +43,9 @@ const RULES = {
   'lifecycle-script': 'install script that runs on every consumer machine',
   'publish-intent': 'package metadata that contradicts a public release',
   'entry-point': 'main, module, types, bin or exports target missing from the tarball',
+  'native-debug-info': 'native debug symbols (.pdb, .dSYM) that map binaries back to source',
+  'wheel-record': 'wheel RECORD does not match the files it ships',
+  'vcs-dir': 'VCS, virtualenv, cache or node_modules directory swept into the package',
   'archive-integrity': 'link, device or duplicate entry the scan cannot vouch for',
 };
 
@@ -179,6 +182,94 @@ function loadConfig(files) {
     throw new GuardError(`package.json is not valid JSON: ${e.message}`);
   }
   return parseConfig(json);
+}
+
+function tomlValue(src, pos, where) {
+  const ws = () => { while (pos.i < src.length && /[ \t\r\n]/.test(src[pos.i]) || src[pos.i] === '#') { if (src[pos.i] === '#') while (pos.i < src.length && src[pos.i] !== '\n') pos.i++; else pos.i++; } };
+  ws();
+  const c = src[pos.i];
+  if (c === '"') {
+    let out = '';
+    pos.i++;
+    while (pos.i < src.length && src[pos.i] !== '"') {
+      if (src[pos.i] === '\\') {
+        const n = src[pos.i + 1];
+        out += { n: '\n', t: '\t', '"': '"', '\\': '\\' }[n] ?? n;
+        pos.i += 2;
+      } else out += src[pos.i++];
+    }
+    if (src[pos.i] !== '"') throw new GuardError(`${where}: unterminated string`);
+    pos.i++;
+    return out;
+  }
+  if (c === "'") {
+    const end = src.indexOf("'", pos.i + 1);
+    if (end === -1) throw new GuardError(`${where}: unterminated string`);
+    const out = src.slice(pos.i + 1, end);
+    pos.i = end + 1;
+    return out;
+  }
+  if (c === '[') {
+    pos.i++;
+    const arr = [];
+    for (;;) {
+      ws();
+      if (src[pos.i] === ']') { pos.i++; return arr; }
+      arr.push(tomlValue(src, pos, where));
+      ws();
+      if (src[pos.i] === ',') pos.i++;
+      else if (src[pos.i] !== ']') throw new GuardError(`${where}: expected , or ] in array`);
+    }
+  }
+  if (c === '{') {
+    pos.i++;
+    const obj = {};
+    for (;;) {
+      ws();
+      if (src[pos.i] === '}') { pos.i++; return obj; }
+      const m = /^([A-Za-z0-9_-]+|"[^"]*")[ \t]*=/.exec(src.slice(pos.i));
+      if (!m) throw new GuardError(`${where}: expected key = value in inline table`);
+      pos.i += m[0].length;
+      obj[m[1].replace(/^"|"$/g, '')] = tomlValue(src, pos, where);
+      ws();
+      if (src[pos.i] === ',') pos.i++;
+      else if (src[pos.i] !== '}') throw new GuardError(`${where}: expected , or } in inline table`);
+    }
+  }
+  const m = /^(true|false|[+-]?[0-9][0-9_]*(\.[0-9_]+)?)/.exec(src.slice(pos.i));
+  if (!m) throw new GuardError(`${where}: unsupported TOML value (shipsafe reads strings, numbers, booleans, arrays and inline tables)`);
+  pos.i += m[0].length;
+  return m[1] === 'true' ? true : m[1] === 'false' ? false : Number(m[1].replace(/_/g, ''));
+}
+
+export function readTomlTable(text, table, where = 'TOML') {
+  const out = {};
+  const lines = text.split(/\r?\n/);
+  let current = null;
+  let target = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/^\s+/, '');
+    const header = /^\[\[?\s*([A-Za-z0-9_.\-"]+)\s*\]\]?\s*(#.*)?$/.exec(line);
+    if (header) {
+      current = header[1].replace(/"/g, '');
+      const arrayTable = line.startsWith('[[');
+      target = null;
+      if (current === table) target = out;
+      else if (current.startsWith(`${table}.`)) {
+        const key = current.slice(table.length + 1);
+        if (arrayTable) { out[key] = out[key] ?? []; const t = {}; out[key].push(t); target = t; } else { out[key] = out[key] ?? {}; target = out[key]; }
+      }
+      continue;
+    }
+    if (!target || !line || line.startsWith('#')) continue;
+    const kv = /^([A-Za-z0-9_-]+|"[^"]*")\s*=\s*/.exec(line);
+    if (!kv) throw new GuardError(`${where}: cannot read line ${i + 1} of [${current}]`);
+    const rest = [line.slice(kv[0].length), ...lines.slice(i + 1)].join('\n');
+    const pos = { i: 0 };
+    target[kv[1].replace(/^"|"$/g, '')] = tomlValue(rest, pos, `${where} [${current}]`);
+    i += (rest.slice(0, pos.i).match(/\n/g) ?? []).length;
+  }
+  return out;
 }
 
 function parseConfig(json) {
@@ -554,7 +645,8 @@ function openTarball(file) {
       : all.map((e) => ({ ...e, rel: e.path.replace(/\/$/, '') })), notes);
     const files = entries.filter((e) => e.type === '0').map((e) => ({ path: e.rel, size: e.size, data: e.data }));
     const nupkg = [...names].some((n) => !n.includes('/') && n.endsWith('.nuspec'));
-    const kind = vsix ? 'vsix' : nupkg ? 'nupkg' : names.has('META-INF/MANIFEST.MF') ? 'jar' : names.has('manifest.json') ? 'webext' : 'generic';
+    const wheel = [...names].some((n) => /^[^/]+\.dist-info\/WHEEL$/.test(n));
+    const kind = vsix ? 'vsix' : wheel ? 'wheel' : nupkg ? 'nupkg' : names.has('META-INF/MANIFEST.MF') ? 'jar' : names.has('manifest.json') ? 'webext' : 'generic';
     const symbols = !Buffer.isBuffer(file) && /\.(snupkg|symbols\.nupkg)$/i.test(file);
     if (nupkg && !symbols && [...names].some((n) => n.startsWith('src/'))) {
       notes.push('the package carries a src/ directory; that is normal only for a symbols package (.snupkg), check that sources were meant to ship');
@@ -591,7 +683,11 @@ function openTarball(file) {
   const files = entries
     .filter((e) => e.type === '0' || e.type === '7')
     .map((e) => ({ path: e.rel, size: e.size, data: e.data }));
-  return { raw, entries, files, kind: files.some((f) => f.path === 'package.json') ? 'npm' : 'generic', format: 'tar' };
+  const has = (p) => files.some((f) => f.path === p);
+  const kind = has('PKG-INFO') && (has('pyproject.toml') || has('setup.py') || has('setup.cfg')) ? 'sdist'
+    : has('Cargo.toml') && (has('Cargo.toml.orig') || has('.cargo_vcs_info.json')) ? 'crate'
+    : has('package.json') ? 'npm' : 'generic';
+  return { raw, entries, files, kind, format: 'tar' };
 }
 
 const KIND_RULES = {
@@ -603,6 +699,9 @@ const KIND_RULES = {
   jar: DIR_RULES,
   gem: DIR_RULES,
   image: new Set(['sensitive-file', 'secret-token']),
+  wheel: new Set([...DIR_RULES, 'file-size', 'entry-point', 'native-debug-info', 'wheel-record', 'vcs-dir', 'test-path']),
+  sdist: new Set([...DIR_RULES, 'file-size', 'vcs-dir']),
+  crate: new Set([...DIR_RULES, 'file-size', 'vcs-dir']),
 };
 const BROAD_HOSTS = new Set(['<all_urls>', '*://*/*', 'http://*/*', 'https://*/*', '*://*/', 'http://*/', 'https://*/']);
 
@@ -619,15 +718,114 @@ function webextWarnings(files) {
   return [m, broad.length ? [`manifest.json requests broad host access (${broad.join(', ')}); stores review this closely, narrow it if you can`] : []];
 }
 
+const SWEPT_DIRS = new Set(['.hg', '.svn', '.venv', 'venv', '.tox', '.nox', '.mypy_cache', '.pytest_cache', '.ruff_cache', 'node_modules', '__pypackages__']);
+const normPyName = (n) => String(n ?? '').toLowerCase().replace(/[-_.]+/g, '_');
+
+function pkgInfoField(text, field) {
+  const m = new RegExp(`^${field}:\\s*(.+)$`, 'mi').exec(text);
+  return m ? m[1].trim() : undefined;
+}
+
+function tomlConfig(text, table, where) {
+  const raw = readTomlTable(text, table, where);
+  return parseConfig(Object.keys(raw).length ? { shipsafe: raw } : {});
+}
+
+function wheelConfig(file, distName) {
+  if (Buffer.isBuffer(file)) return { config: parseConfig({}), note: 'no pyproject.toml for a downloaded wheel; strict defaults apply' };
+  for (let d = dirname(resolve(file)); ; d = dirname(d)) {
+    const p = join(d, 'pyproject.toml');
+    if (existsSync(p)) {
+      const text = readFileSync(p, 'utf8');
+      if (normPyName(readTomlTable(text, 'project', p).name) === distName) return { config: tomlConfig(text, 'tool.shipsafe', p), source: p };
+    }
+    if (dirname(d) === d) break;
+  }
+  return { config: parseConfig({}), note: `no pyproject.toml whose [project].name matches ${distName} was found at or above the wheel; strict defaults apply` };
+}
+
+function ecosystemSetup(kind, files, file) {
+  const text = (p) => files.findLast((f) => f.path === p)?.data.toString('utf8') ?? '';
+  if (kind === 'sdist') {
+    const info = text('PKG-INFO');
+    const config = files.some((f) => f.path === 'pyproject.toml') ? tomlConfig(text('pyproject.toml'), 'tool.shipsafe', 'pyproject.toml') : parseConfig({});
+    return { config, name: pkgInfoField(info, 'Name'), version: pkgInfoField(info, 'Version'), notes: [] };
+  }
+  if (kind === 'crate') {
+    const cargo = text('Cargo.toml');
+    const pkg = readTomlTable(cargo, 'package', 'Cargo.toml');
+    return { config: tomlConfig(cargo, 'package.metadata.shipsafe', 'Cargo.toml'), name: pkg.name, version: pkg.version, notes: [] };
+  }
+  const distInfo = files.map((f) => f.path.split('/')[0]).find((d) => d.endsWith('.dist-info'));
+  const meta = text(`${distInfo}/METADATA`);
+  const name = pkgInfoField(meta, 'Name');
+  const { config, note, source } = wheelConfig(file, normPyName(name));
+  return { config, name, version: pkgInfoField(meta, 'Version'), distInfo, notes: note ? [note] : [], source };
+}
+
+function wheelChecks(files, distInfo, record, warnings) {
+  const present = new Map(files.map((f) => [f.path, f]));
+  const recordPath = `${distInfo}/RECORD`;
+  const recordFile = present.get(recordPath);
+  const problems = [];
+  if (!recordFile) problems.push('RECORD is missing');
+  else {
+    const listed = new Set();
+    for (const line of recordFile.data.toString('utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const cols = [];
+      let cur = '';
+      let quoted = false;
+      for (const ch of line) {
+        if (ch === '"') quoted = !quoted;
+        else if (ch === ',' && !quoted) { cols.push(cur); cur = ''; } else cur += ch;
+      }
+      cols.push(cur);
+      const [path, hash] = cols;
+      listed.add(path);
+      if (/(^|\/)RECORD(\.jws|\.p7s)?$/.test(path)) continue;
+      const f = present.get(path);
+      if (!f) { problems.push(`${path} is listed but not in the wheel`); continue; }
+      if (hash?.startsWith('sha256=')) {
+        const got = createHash('sha256').update(f.data).digest('base64url');
+        if (got !== hash.slice(7)) problems.push(`${path} does not match its RECORD hash`);
+      }
+    }
+    for (const p of present.keys()) if (!listed.has(p) && !/(^|\/)RECORD(\.jws|\.p7s)?$/.test(p)) problems.push(`${p} ships but is not in RECORD`);
+  }
+  for (const p of problems.slice(0, 10)) record(recordPath, [['wheel-record', p]]);
+  const eps = present.get(`${distInfo}/entry_points.txt`)?.data.toString('utf8') ?? '';
+  let section = '';
+  const modPaths = (mod) => {
+    const base = mod.replace(/\./g, '/');
+    const roots = ['', ...[...new Set(files.map((f) => /^[^/]+\.data\/(purelib|platlib)\//.exec(f.path)?.[0]).filter(Boolean))]];
+    return roots.some((r) => present.has(`${r}${base}.py`) || present.has(`${r}${base}/__init__.py`) || files.some((f) => f.path.startsWith(`${r}${base}.`) && /\.(so|pyd)$/.test(f.path)));
+  };
+  for (const line of eps.split(/\r?\n/)) {
+    const h = /^\[(.+)\]$/.exec(line.trim());
+    if (h) { section = h[1]; continue; }
+    const m = /^\s*([^=\s]+)\s*=\s*([A-Za-z0-9_.]+)\s*(:|$)/.exec(line);
+    if (m && (section === 'console_scripts' || section === 'gui_scripts') && !modPaths(m[2])) {
+      record(`${distInfo}/entry_points.txt#${m[1]}`, [['entry-point', `module ${m[2]} is not in the wheel`]]);
+    }
+  }
+  const pyc = files.filter((f) => /(^|\/)__pycache__\/|\.pyc$/.test(f.path)).length;
+  if (pyc) warnings.push(`${pyc} compiled .pyc file(s) ship; they carry the builder's absolute source paths`);
+  for (const f of files) {
+    if (/\.(so|pyd|dylib)$/i.test(f.path) && (f.data.includes('.debug_info') || f.data.includes('__debug_info'))) warnings.push(`${f.path} carries debug sections (unstripped); strip it unless symbols are meant to ship`);
+  }
+}
+
 export function checkTarball(file, label, { asset = false } = {}) {
   const { raw, entries, files, kind, format, notes = [], imageName } = openTarball(file);
   const sha256 = createHash('sha256').update(raw).digest('hex');
   if (kind === 'generic' && format === 'tar' && !asset) loadConfig(files);
   const allowed = KIND_RULES[kind];
-  const config = kind === 'npm' || kind === 'vsix' ? loadConfig(files) : parseConfig({});
+  const eco = ['wheel', 'sdist', 'crate'].includes(kind) ? ecosystemSetup(kind, files, file) : null;
+  const config = eco ? eco.config : kind === 'npm' || kind === 'vsix' ? loadConfig(files) : parseConfig({});
   const [webext, extWarnings] = kind === 'webext' ? webextWarnings(files) : [null, []];
   const findings = [];
-  const warnings = [...config.warnings, ...extWarnings, ...notes];
+  const warnings = [...config.warnings, ...extWarnings, ...notes, ...(eco?.notes ?? [])];
   const integrity = new Map();
   const note = (path, detail) => { if (!integrity.has(path)) integrity.set(path, detail); };
   for (const e of entries) {
@@ -659,6 +857,18 @@ export function checkTarball(file, label, { asset = false } = {}) {
   } else if (isPrerelease(config.version) && !config.publishConfig.tag) {
     warnings.push(`prerelease ${config.version} goes to the latest dist-tag unless you publish with --tag <name>`);
   }
+  if (kind === 'wheel') wheelChecks(files, eco.distInfo, record, warnings);
+  if (eco) {
+    const swept = new Set();
+    for (const f of files) {
+      const segs = f.path.split('/');
+      const hit = segs.slice(0, -1).find((d) => SWEPT_DIRS.has(d)) ?? (kind === 'crate' && segs[0] === 'target' ? 'target' : null);
+      if (hit) {
+        const dir = segs.slice(0, segs.indexOf(hit) + 1).join('/');
+        if (!swept.has(dir)) { swept.add(dir); record(`${dir}/`, [['vcs-dir', `${hit}/ ships (${files.filter((x) => x.path.startsWith(`${dir}/`)).length} files)`]]); }
+      }
+    }
+  }
   const present = new Set(files.map((f) => f.path));
   for (const [key, target] of missingEntryPoints(config.pkg, present)) record(`package.json#${key}`, [['entry-point', `${target} is not in the tarball`]]);
   if (!config.scripts.install && !config.scripts.preinstall && files.some((f) => f.path === 'binding.gyp')) {
@@ -668,6 +878,12 @@ export function checkTarball(file, label, { asset = false } = {}) {
   for (const f of files) {
     unpackedBytes += f.size;
     let hits = [...scanPath(f.inner ?? f.path), ...scanContent(f.data)];
+    if (kind === 'wheel') {
+      const top = f.path.split('/')[0];
+      if (hits.some(([rule]) => rule === 'test-path') && top !== 'tests' && top !== 'test') warnings.push(`test module ${f.path} ships inside a package; fine if intended`);
+      hits = hits.filter(([rule]) => rule !== 'test-path' || top === 'tests' || top === 'test');
+      if (/\.pdb$/i.test(f.path) || f.path.split('/').some((seg) => /\.dSYM$/i.test(seg))) hits.push(['native-debug-info', 'debug symbols map the binary back to source paths and sometimes source']);
+    }
     if (kind === 'image') {
       if (IMAGE_VENDOR_PATHS.test(f.inner)) hits = hits.filter(([rule]) => rule !== 'sensitive-file');
       if (f.deletedIn) hits = hits.map(([rule, detail]) => [rule, `${detail ? `${detail}; ` : ''}deleted in ${f.deletedIn} but still readable in ${f.layer}`]);
@@ -682,7 +898,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
     version: VERSION,
     file: label ?? resolve(file),
     kind,
-    package: kind === 'image' ? imageName : kind === 'asar' ? 'Electron asar archive' : kind === 'nupkg' ? 'NuGet package' : kind === 'jar' ? 'Java archive' : kind === 'gem' ? 'Ruby gem' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
+    package: eco ? `${eco.name}@${eco.version} (${kind})` : kind === 'image' ? imageName : kind === 'asar' ? 'Electron asar archive' : kind === 'nupkg' ? 'NuGet package' : kind === 'jar' ? 'Java archive' : kind === 'gem' ? 'Ruby gem' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
     manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
     files: files.length,
@@ -962,8 +1178,14 @@ function formatReport(r) {
     if (script) lines.push(`HINT  a native addon build such as \`node-gyp rebuild\` is a legitimate install script; allow it in the packed package.json with "shipsafe": { "allow": [{ "rule": "lifecycle-script", "path": "${script.path}", "reason": "<why consumers must run it>" }] }`);
   } else if (r.kind === 'directory') {
     lines.push(`PASS  deploy exactly this directory: ${r.file}`);
-  } else {
+  } else if (r.kind === 'npm') {
     lines.push(`PASS  publish exactly this file: npm publish ${r.file}`);
+  } else if (r.kind === 'wheel' || r.kind === 'sdist') {
+    lines.push(`PASS  upload exactly this file: twine upload ${r.file}  (or uv publish ${r.file})`);
+  } else if (r.kind === 'crate') {
+    lines.push('PASS  cargo publish re-packages the tree instead of uploading this file; publish with --locked from the same tree');
+  } else {
+    lines.push(`PASS  ship exactly this file: ${r.file}`);
   }
   return lines.join('\n');
 }
@@ -1148,7 +1370,7 @@ function findDeploy(prog, args, cwd) {
   return null;
 }
 const GH_VALUE_OPTS = new Set(['-t', '--title', '-n', '--notes', '-F', '--notes-file', '--target', '--discussion-category', '-R', '--repo', '--notes-start-tag', '--notes-from-tag']);
-const SCANNABLE_ASSET = /\.(tgz|tar\.gz|zip|vsix|asar|nupkg|snupkg|jar|gem)$/i;
+const SCANNABLE_ASSET = /\.(tgz|tar\.gz|zip|vsix|asar|nupkg|snupkg|jar|gem|whl|crate)$/i;
 
 function findReleaseAssets(args, cwd) {
   const pos = deployPositionals(args, GH_VALUE_OPTS);

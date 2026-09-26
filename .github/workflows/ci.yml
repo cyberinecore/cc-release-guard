@@ -19,6 +19,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - uses: astral-sh/setup-uv@v6
       - run: npm test
       - name: Dogfood the CLI package
         working-directory: cli

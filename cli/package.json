@@ -1,13 +1,13 @@
 {
-  "name": "release-guard",
+  "name": "shipsafe",
   "version": "0.1.0",
   "description": "Deterministic npm tarball gate: fails a packed .tgz that ships source maps, embedded sources, TypeScript sources, src/ or test paths, oversized files, or storage-bucket URLs.",
   "type": "module",
   "bin": {
-    "release-guard": "release-guard.mjs"
+    "shipsafe": "shipsafe.mjs"
   },
   "files": [
-    "release-guard.mjs"
+    "shipsafe.mjs"
   ],
   "engines": {
     "node": ">=18"

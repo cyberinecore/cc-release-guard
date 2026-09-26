@@ -1,5 +1,5 @@
 {
-  "name": "release-guard-plugin",
+  "name": "shipsafe-plugin",
   "private": true,
   "type": "module",
   "scripts": {

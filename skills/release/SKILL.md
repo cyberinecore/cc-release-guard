@@ -1,9 +1,9 @@
 ---
-name: safe-publish
-description: Prepare an npm package release that cannot leak source by accident - build, pack the real tarball, run the release-guard gate on it, and hand the human the exact publish command for their OTP. Use when the user says "publish to npm", "release this package", "npm publish", "ship a new version", "phat hanh len npm", "publish package nay", or asks how to bundle a library or CLI so its source is not shipped.
+name: release
+description: This skill should be used when the user is about to publish an npm package - "publish to npm", "release this package", "npm publish", "ship a version", "phat hanh len npm", "publish package nay", "len version moi", or asks how to ship a package without its source. Builds, packs the real tarball, gates it with shipsafe, and hands the human the exact publish command for their OTP; never publishes.
 ---
 
-# Safe publish (npm)
+# shipsafe release (npm)
 
 Goal: the file that reaches the registry is exactly the file the gate checked, and that file carries build output only. This prevents ACCIDENTAL source leaks and raises the cost of reversing. It does not make JavaScript unreversable: minified JS, and the JS inside a `bun build --compile` executable, stay readable with effort (`strings` prints the JS of a Bun executable). Say this plainly whenever the user asks for "protection"; logic that must stay secret belongs on a server the user runs.
 
@@ -35,7 +35,7 @@ Also check the license field against the intent (closed source with `"license": 
 
 - One binary per target, no `--sourcemap`: `bun build ./src/cli.ts --compile --minify --target=bun-<os>-<arch> --outfile dist/<name>` for each of `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `windows-x64`.
 - Ship each binary as its own package (`<name>-<os>-<arch>` with matching `os` and `cpu` fields) and a small launcher package that lists them all under `optionalDependencies` and execs the one matching `process.platform`/`process.arch`. This is the esbuild and Biome pattern.
-- Per-platform binaries are 60-230 MB, so raise the size threshold only in those packages: `"releaseGuard": { "maxFileBytes": 262144000 }`.
+- Per-platform binaries are 60-230 MB, so raise the size threshold only in those packages: `"shipsafe": { "maxFileBytes": 262144000 }`.
 - Spike first: confirm every dependency (native addons, Ink/React, node-pty) runs under `bun --compile` before promising this route.
 
 ## 3. Build, pack, gate
@@ -46,13 +46,13 @@ Run from the package directory, in this order, and stop at the first failure:
 npm ci
 npm run build
 npm pack --pack-destination .local/release
-node "${CLAUDE_PLUGIN_ROOT}/cli/release-guard.mjs" check .local/release/<name>-<version>.tgz
+node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" check .local/release/<name>-<version>.tgz
 ```
 
 Make sure `.local/` is gitignored. The gate fails on any `*.map`, embedded `sourcesContent`, inline or remote source map, `.ts`/`.tsx` other than `.d.ts`, a `src/` or test path, a credential file (`.env*`, `.npmrc`, keys), a file over `maxFileBytes` (default 5 MiB), or a URL to a storage bucket (S3, R2, GCS, Azure Blob, Spaces, B2, Wasabi). Fix the build, not the gate. When a finding is genuinely intended, add an exception to `package.json` and show it to the user; every exception needs a reason and ships inside the package:
 
 ```json
-"releaseGuard": { "allow": [{ "rule": "bucket-url", "path": "dist/*.js", "reason": "documented public download bucket" }] }
+"shipsafe": { "allow": [{ "rule": "bucket-url", "path": "dist/*.js", "reason": "documented public download bucket" }] }
 ```
 
 Then confirm the version is still free (npm never lets a version be republished): `npm view <name>@<version> version` must return E404.
@@ -77,6 +77,6 @@ Run the same gate before any publish step, on the same file the publish step upl
 
 ```sh
 npm pack --pack-destination out
-npx --yes release-guard@0.1.0 check out/*.tgz
+npx --yes shipsafe@0.1.0 check out/*.tgz
 npm publish out/*.tgz --provenance --access public
 ```

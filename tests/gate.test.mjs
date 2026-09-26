@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const CLI = resolve(dirname(fileURLToPath(import.meta.url)), '../cli/release-guard.mjs');
-const root = mkdtempSync(join(tmpdir(), 'release-guard-test-'));
+const CLI = resolve(dirname(fileURLToPath(import.meta.url)), '../cli/shipsafe.mjs');
+const root = mkdtempSync(join(tmpdir(), 'shipsafe-test-'));
 
 function pack(name, files, pkgExtra = {}) {
   const dir = join(root, name);
@@ -73,7 +73,7 @@ test('storage bucket URLs fail unless allowed with a reason', () => {
   assert.deepEqual(rules(blocked.report), ['bucket-url']);
   assert.match(blocked.report.findings[0].detail, /r2\.dev/);
   const allowed = check(pack('bucket-allowed', files, {
-    releaseGuard: { allow: [{ rule: 'bucket-url', path: '*.js', reason: 'public asset bucket, documented download' }, { rule: 'file-size', path: 'x', reason: 'stale entry kept on purpose' }] },
+    shipsafe: { allow: [{ rule: 'bucket-url', path: '*.js', reason: 'public asset bucket, documented download' }, { rule: 'file-size', path: 'x', reason: 'stale entry kept on purpose' }] },
   }));
   assert.equal(allowed.code, 0);
   assert.equal(allowed.report.findings[0].allowed, true);
@@ -81,13 +81,13 @@ test('storage bucket URLs fail unless allowed with a reason', () => {
 });
 
 test('an allow entry without a reason is a config error', () => {
-  const r = check(pack('noreason', { 'index.js': 'x\n' }, { releaseGuard: { allow: [{ rule: 'bucket-url', path: '*' }] } }));
+  const r = check(pack('noreason', { 'index.js': 'x\n' }, { shipsafe: { allow: [{ rule: 'bucket-url', path: '*' }] } }));
   assert.equal(r.code, 2);
   assert.match(r.stderr, /reason/);
 });
 
 test('files over the size threshold fail', () => {
-  const r = check(pack('big', { 'index.js': 'x'.repeat(2048) }, { releaseGuard: { maxFileBytes: 1024 } }));
+  const r = check(pack('big', { 'index.js': 'x'.repeat(2048) }, { shipsafe: { maxFileBytes: 1024 } }));
   assert.deepEqual(rules(r.report), ['file-size']);
 });
 

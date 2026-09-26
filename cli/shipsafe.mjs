@@ -146,13 +146,13 @@ function loadConfig(files) {
   } catch (e) {
     throw new GuardError(`package.json is not valid JSON: ${e.message}`);
   }
-  const raw = json.releaseGuard ?? {};
+  const raw = json.shipsafe ?? {};
   const maxFileBytes = raw.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
-  if (!Number.isFinite(maxFileBytes) || maxFileBytes <= 0) throw new GuardError('releaseGuard.maxFileBytes must be a positive number');
+  if (!Number.isFinite(maxFileBytes) || maxFileBytes <= 0) throw new GuardError('shipsafe.maxFileBytes must be a positive number');
   const allow = (raw.allow ?? []).map((a, i) => {
-    if (!a || !RULES[a.rule]) throw new GuardError(`releaseGuard.allow[${i}].rule must be one of: ${Object.keys(RULES).join(', ')}`);
-    if (typeof a.path !== 'string' || !a.path) throw new GuardError(`releaseGuard.allow[${i}].path is required`);
-    if (typeof a.reason !== 'string' || a.reason.trim().length < 10) throw new GuardError(`releaseGuard.allow[${i}].reason must explain the exception (10+ chars)`);
+    if (!a || !RULES[a.rule]) throw new GuardError(`shipsafe.allow[${i}].rule must be one of: ${Object.keys(RULES).join(', ')}`);
+    if (typeof a.path !== 'string' || !a.path) throw new GuardError(`shipsafe.allow[${i}].path is required`);
+    if (typeof a.reason !== 'string' || a.reason.trim().length < 10) throw new GuardError(`shipsafe.allow[${i}].reason must explain the exception (10+ chars)`);
     return { ...a, re: globToRegex(a.path), used: false };
   });
   return { name: json.name, version: json.version, maxFileBytes, allow };
@@ -237,7 +237,7 @@ export function checkTarball(file) {
 }
 
 function formatReport(r) {
-  const lines = [`release-guard ${r.version}  ${r.package}  ${r.file}`, `sha256 ${r.sha256}  files ${r.files}  unpacked ${r.unpackedBytes} bytes`];
+  const lines = [`shipsafe ${r.version}  ${r.package}  ${r.file}`, `sha256 ${r.sha256}  files ${r.files}  unpacked ${r.unpackedBytes} bytes`];
   for (const f of r.findings) {
     const tag = f.allowed ? 'ALLOW' : 'FAIL ';
     const detail = f.detail ? `: ${f.detail}` : '';
@@ -377,9 +377,9 @@ export function findPublishes(command, startCwd) {
 function evaluatePublish(p) {
   const cmd = `${p.manager} publish`;
   if (p.dryRun) return null;
-  if (p.unsupported) return `\`${cmd}\` cannot publish a prebuilt tarball. Pack, run \`release-guard check <file>.tgz\`, then publish that file with \`npm publish <file>.tgz\`.`;
-  if (!p.tarballArg) return `\`${cmd}\` without a tarball publishes the working tree, which nothing has checked. Build, pack (\`npm pack\`), run \`release-guard check <file>.tgz\`, then \`${cmd} <file>.tgz\`.`;
-  if (!/\.(tgz|tar\.gz)$/i.test(p.tarballArg)) return `\`${cmd} ${p.tarballArg}\` does not name a .tgz tarball. Publish only a packed tarball that passed \`release-guard check\`.`;
+  if (p.unsupported) return `\`${cmd}\` cannot publish a prebuilt tarball. Pack, run \`shipsafe check <file>.tgz\`, then publish that file with \`npm publish <file>.tgz\`.`;
+  if (!p.tarballArg) return `\`${cmd}\` without a tarball publishes the working tree, which nothing has checked. Build, pack (\`npm pack\`), run \`shipsafe check <file>.tgz\`, then \`${cmd} <file>.tgz\`.`;
+  if (!/\.(tgz|tar\.gz)$/i.test(p.tarballArg)) return `\`${cmd} ${p.tarballArg}\` does not name a .tgz tarball. Publish only a packed tarball that passed \`shipsafe check\`.`;
   const t = resolveTarball(p.tarballArg, p.cwd);
   if (t.error) return t.error;
   if (!existsSync(t.path) || !statSync(t.path).isFile()) return `tarball not found: ${t.path}`;
@@ -387,10 +387,10 @@ function evaluatePublish(p) {
   try {
     r = checkTarball(t.path);
   } catch (e) {
-    return `release-guard could not check ${t.path}: ${e.message}`;
+    return `shipsafe could not check ${t.path}: ${e.message}`;
   }
   if (r.pass) return null;
-  return `release-guard check failed for ${t.path}:\n${formatReport(r)}`;
+  return `shipsafe check failed for ${t.path}:\n${formatReport(r)}`;
 }
 
 function runHook() {
@@ -407,28 +407,28 @@ function runHook() {
     reasons = findPublishes(command, input.cwd || process.cwd()).map(evaluatePublish).filter(Boolean);
   } catch (e) {
     if (!/\bpublish\b/.test(command)) return 0;
-    reasons = [`release-guard could not parse this publish command (${e.message}); run the publish as a plain \`npm publish <file>.tgz\``];
+    reasons = [`shipsafe could not parse this publish command (${e.message}); run the publish as a plain \`npm publish <file>.tgz\``];
   }
   if (!reasons.length) return 0;
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
-      permissionDecisionReason: `release-guard blocked this publish.\n${reasons.join('\n')}`,
+      permissionDecisionReason: `shipsafe blocked this publish.\n${reasons.join('\n')}`,
     },
   }));
   return 0;
 }
 
-const USAGE = `release-guard ${VERSION}
+const USAGE = `shipsafe ${VERSION}
 
 Usage:
-  release-guard check <file.tgz> [--json]   scan a packed npm tarball; exit 1 on any finding
-  release-guard hook                        Claude Code PreToolUse hook (reads JSON on stdin)
-  release-guard --version
+  shipsafe check <file.tgz> [--json]   scan a packed npm tarball; exit 1 on any finding
+  shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin)
+  shipsafe --version
 
 Rules: ${Object.keys(RULES).join(', ')}
-Config: "releaseGuard": { "maxFileBytes": <n>, "allow": [{ "rule", "path", "reason" }] } in the packed package.json`;
+Config: "shipsafe": { "maxFileBytes": <n>, "allow": [{ "rule", "path", "reason" }] } in the packed package.json`;
 
 function main(argv) {
   const [cmd, ...rest] = argv;
@@ -444,7 +444,7 @@ function main(argv) {
       return r.pass ? 0 : 1;
     } catch (e) {
       if (!(e instanceof GuardError) && e.code !== 'ENOENT' && e.code !== 'EISDIR') throw e;
-      console.error(`release-guard: ${e.message}`);
+      console.error(`shipsafe: ${e.message}`);
       return 2;
     }
   }

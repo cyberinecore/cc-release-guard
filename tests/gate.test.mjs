@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,4 +147,65 @@ test('the hook sees publishes behind runners, shells, eval, xargs and find', () 
   for (const c of ['npm exec foo', 'npx eslint .', 'bash -c "npm test"', 'ls | xargs rm', 'find . -exec cat {} +']) {
     assert.equal(hook(c), null, c);
   }
+});
+
+function tarEntry(name, body = '', type = '0', linkname = '') {
+  const data = Buffer.from(body);
+  const h = Buffer.alloc(512);
+  h.write(name, 0, 100);
+  h.write('0000644\0', 100);
+  h.write('0000000\0', 108);
+  h.write('0000000\0', 116);
+  h.write(data.length.toString(8).padStart(11, '0') + '\0', 124);
+  h.write('00000000000\0', 136);
+  h.write('        ', 148);
+  h.write(type, 156);
+  h.write(linkname, 157, 100);
+  h.write('ustar\0' + '00', 257);
+  let sum = 0;
+  for (const b of h) sum += b;
+  h.write(sum.toString(8).padStart(6, '0') + '\0 ', 148);
+  return Buffer.concat([h, data, Buffer.alloc((512 - (data.length % 512)) % 512)]);
+}
+
+function handBuilt(name, entries, { truncate = 0 } = {}) {
+  const pkg = tarEntry('package/package.json', JSON.stringify({ name, version: '1.0.0' }));
+  let tar = Buffer.concat([pkg, ...entries, Buffer.alloc(1024)]);
+  if (truncate) tar = tar.subarray(0, tar.length - truncate);
+  const file = join(root, `${name}.tgz`);
+  writeFileSync(file, gzipSync(tar));
+  return file;
+}
+
+test('hand-built hostile tarballs: links and duplicate paths are archive-integrity findings', () => {
+  const link = check(handBuilt('hostile-link', [tarEntry('package/index.js', '', '2', '../../../etc/passwd')]));
+  assert.equal(link.code, 1);
+  assert.deepEqual(rules(link.report), ['archive-integrity']);
+  assert.match(link.report.findings[0].detail, /symlink to/);
+  const dup = check(handBuilt('hostile-dup', [tarEntry('package/index.js', 'a'), tarEntry('package/index.js', 'b')]));
+  assert.equal(dup.code, 1);
+  assert.deepEqual(rules(dup.report), ['archive-integrity']);
+  assert.match(dup.report.findings[0].detail, /duplicate path/);
+});
+
+test('hand-built hostile tarballs: traversal, absolute paths, truncation and oversized gzip exit 2', () => {
+  const cases = [
+    [handBuilt('hostile-dotdot', [tarEntry('package/../x.js', 'x')]), /escapes the package root/],
+    [handBuilt('hostile-abs', [tarEntry('/etc/x.js', 'x')]), /escapes the package root/],
+    [handBuilt('hostile-truncated-tar', [tarEntry('package/index.js', 'x'.repeat(2000))], { truncate: 2048 }), /truncated/],
+  ];
+  const gz = readFileSync(good);
+  const truncatedGz = join(root, 'hostile-truncated-gzip.tgz');
+  writeFileSync(truncatedGz, gz.subarray(0, gz.length - 20));
+  cases.push([truncatedGz, /gunzip|truncated/]);
+  const bomb = join(root, 'hostile-bomb.tgz');
+  const member = gzipSync(Buffer.alloc(64 * 1024 * 1024));
+  writeFileSync(bomb, Buffer.concat(Array(17).fill(member)));
+  cases.push([bomb, /unpacks to more than/]);
+  for (const [file, reason] of cases) {
+    const r = check(file);
+    assert.equal(r.code, 2, file);
+    assert.match(r.stderr, reason, file);
+  }
+  assert.equal(check(good).code, 0);
 });

@@ -8,6 +8,7 @@ import { gunzipSync } from 'node:zlib';
 
 const VERSION = '0.1.0';
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_UNPACKED_BYTES = 1024 * 1024 * 1024;
 const MANAGERS = new Set(['npm', 'pnpm', 'bun', 'yarn']);
 const WRAPPERS = new Set(['time', 'nice', 'nohup', 'command', 'builtin', 'noglob', 'exec', 'sudo']);
 const VALUE_OPTS = new Set([
@@ -33,6 +34,7 @@ const RULES = {
   'sensitive-file': 'credential or VCS file',
   'file-size': 'file over the size threshold',
   'bucket-url': 'URL to a storage bucket',
+  'archive-integrity': 'link, device or duplicate entry the scan cannot vouch for',
 };
 
 const BUCKET_HOSTS = [
@@ -95,25 +97,36 @@ function readTar(buf) {
   let off = 0;
   let pax = {};
   let longName = null;
+  let longLink = null;
+  let ended = false;
   while (off + 512 <= buf.length) {
     const h = buf.subarray(off, off + 512);
-    if (h.every((b) => b === 0)) break;
+    if (h.every((b) => b === 0)) { ended = true; break; }
     if (!headerChecksumOk(h)) throw new GuardError(`not a valid tar archive (bad header checksum at byte ${off})`);
     const type = h[156] === 0 ? '0' : String.fromCharCode(h[156]);
-    const size = pax.size ? Number(pax.size) : parseNumeric(h, 124, 12);
+    const size = pax.size !== undefined ? Number(pax.size) : parseNumeric(h, 124, 12);
+    if (!Number.isSafeInteger(size) || size < 0) throw new GuardError(`malformed tar entry size at byte ${off}`);
     const name = cstr(h, 0, 100);
     const prefix = cstr(h, 257, 6).startsWith('ustar') ? cstr(h, 345, 155) : '';
     off += 512;
+    if (off + size > buf.length) throw new GuardError(`the tar archive is truncated (entry at byte ${off - 512} needs ${size} bytes)`);
     const data = buf.subarray(off, off + size);
     off += Math.ceil(size / 512) * 512;
     if (type === 'x') { pax = parsePax(data); continue; }
     if (type === 'g') continue;
     if (type === 'L') { longName = cstr(data, 0, data.length); continue; }
+    if (type === 'K') { longLink = cstr(data, 0, data.length); continue; }
     const path = pax.path ?? longName ?? (prefix ? `${prefix}/${name}` : name);
+    const linkname = pax.linkpath ?? longLink ?? cstr(h, 157, 100);
     pax = {};
     longName = null;
-    entries.push({ path, type, size, data });
+    longLink = null;
+    if (path.startsWith('/') || /^[A-Za-z]:/.test(path) || path.split(/[\\/]/).includes('..')) {
+      throw new GuardError(`the tar archive has an entry that escapes the package root: ${path}`);
+    }
+    entries.push({ path, type, size, data, linkname });
   }
+  if (!ended) throw new GuardError('the tar archive is truncated (no end-of-archive marker)');
   return entries;
 }
 
@@ -138,7 +151,7 @@ function globToRegex(glob) {
 }
 
 function loadConfig(files) {
-  const pkg = files.find((f) => f.path === 'package.json');
+  const pkg = files.findLast((f) => f.path === 'package.json');
   if (!pkg) throw new GuardError('package.json not found at the tarball root');
   let json;
   try {
@@ -196,8 +209,9 @@ export function checkTarball(file) {
   const sha256 = createHash('sha256').update(raw).digest('hex');
   let tar;
   try {
-    tar = raw[0] === 0x1f && raw[1] === 0x8b ? gunzipSync(raw) : raw;
+    tar = raw[0] === 0x1f && raw[1] === 0x8b ? gunzipSync(raw, { maxOutputLength: MAX_UNPACKED_BYTES }) : raw;
   } catch (e) {
+    if (e.code === 'ERR_BUFFER_TOO_LARGE' || e instanceof RangeError) throw new GuardError(`${file} unpacks to more than ${MAX_UNPACKED_BYTES} bytes; refusing to scan it`);
     throw new GuardError(`cannot gunzip ${file}: ${e.message}`);
   }
   const entries = readTar(tar);
@@ -208,19 +222,33 @@ export function checkTarball(file) {
   const config = loadConfig(files);
   const findings = [];
   const warnings = [];
+  const integrity = new Map();
+  const note = (path, detail) => { if (!integrity.has(path)) integrity.set(path, detail); };
   for (const e of entries) {
-    if (e.type === '1' || e.type === '2') warnings.push(`link entry ${stripRoot(e.path)} was not scanned`);
+    const path = stripRoot(e.path);
+    if (e.type === '1' || e.type === '2') note(path, `${e.type === '2' ? 'symlink' : 'hardlink'} to ${e.linkname}; the gate cannot scan what it points at`);
+    else if (e.type === '3' || e.type === '4' || e.type === '6') note(path, 'device or fifo entry');
+    else if (!['0', '7', '5'].includes(e.type)) note(path, `unknown tar entry type ${JSON.stringify(e.type)}`);
   }
+  const seen = new Set();
+  for (const f of files) {
+    if (seen.has(f.path)) note(f.path, 'duplicate path; the last copy wins on install, every copy was scanned');
+    seen.add(f.path);
+  }
+  const record = (path, hits) => {
+    for (const [rule, detail] of hits) {
+      const allow = config.allow.find((a) => a.rule === rule && a.re.test(path));
+      if (allow) allow.used = true;
+      findings.push({ rule, path, detail, allowed: !!allow, reason: allow?.reason });
+    }
+  };
+  for (const [path, detail] of integrity) record(path, [['archive-integrity', detail]]);
   let unpackedBytes = 0;
   for (const f of files) {
     unpackedBytes += f.size;
     const hits = [...scanPath(f.path), ...scanContent(f.data)];
     if (f.size > config.maxFileBytes) hits.push(['file-size', `${f.size} bytes > ${config.maxFileBytes}`]);
-    for (const [rule, detail] of hits) {
-      const allow = config.allow.find((a) => a.rule === rule && a.re.test(f.path));
-      if (allow) allow.used = true;
-      findings.push({ rule, path: f.path, detail, allowed: !!allow, reason: allow?.reason });
-    }
+    record(f.path, hits);
   }
   for (const a of config.allow) if (!a.used) warnings.push(`unused allow entry: ${a.rule} ${a.path}`);
   return {

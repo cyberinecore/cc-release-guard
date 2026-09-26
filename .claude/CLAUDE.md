@@ -41,5 +41,5 @@ Tarball parsing is hand-written (gzip via `node:zlib`, ustar + pax + GNU longnam
 
 - No top-level `bin/`: claude.ai and Cowork refuse a plugin that has one. The CLI lives in `cli/`.
 - `plugin.json` pins `version`; bump it on every release, together with `cli/package.json` and `VERSION` in `cli/shipsafe.mjs`.
-- Skills are `release` (model-invocable; auto-triggers on publish intent), `init`, `check`, `verify` (slash-only) and `help` (router, fires only with a shipsafe anchor), following the Cyberine ecosystem convention of `/<brand>:<verb>`. The `release` skill stops before the publish command: the human runs it and types the OTP. Never add token storage or reading of token values.
+- Skills are `release` (model-invocable; auto-triggers on publish intent), `init`, `check`, `verify`, `incident` (slash-only) and `help` (router, fires only with a shipsafe anchor), following the Cyberine ecosystem convention of `/<brand>:<verb>`. The `release` skill stops before the publish command: the human runs it and types the OTP. Never add token storage or reading of token values.
 - Tests build real fixtures with `npm pack` in a temp dir; keep them that way rather than hand-crafting tar bytes.

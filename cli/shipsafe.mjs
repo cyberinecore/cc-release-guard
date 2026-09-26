@@ -305,7 +305,7 @@ function openTarball(file) {
   return { raw, entries, files };
 }
 
-export function checkTarball(file) {
+export function checkTarball(file, label) {
   const { raw, entries, files } = openTarball(file);
   const sha256 = createHash('sha256').update(raw).digest('hex');
   const config = loadConfig(files);
@@ -358,7 +358,7 @@ export function checkTarball(file) {
   for (const a of config.allow) if (!a.used) warnings.push(`unused allow entry: ${a.rule} ${a.path}`);
   const report = {
     version: VERSION,
-    file: resolve(file),
+    file: label ?? resolve(file),
     package: `${config.name}@${config.version}`,
     manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
@@ -450,11 +450,12 @@ function diffMarkdown(d) {
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 
-async function fetchPackument(registry, name) {
+async function fetchPackument(registry, name, full = false) {
   const url = `${registry}/${name.replace('/', '%2f')}`;
+  const accept = full ? 'application/json' : 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8';
   let res;
   try {
-    res = await fetch(url, { headers: { accept: 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8' }, signal: AbortSignal.timeout(30000) });
+    res = await fetch(url, { headers: { accept }, signal: AbortSignal.timeout(30000) });
   } catch (e) {
     throw new GuardError(`cannot reach ${registry}: ${e.cause?.code ?? e.message}`);
   }
@@ -534,6 +535,59 @@ export function diffPackages(next, prev) {
   return out;
 }
 
+async function downloadTarball(url, label) {
+  let res;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(120000) });
+  } catch (e) {
+    throw new GuardError(`cannot download ${label}: ${e.cause?.code ?? e.message}`);
+  }
+  if (!res.ok) throw new GuardError(`downloading ${label} answered HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+export async function auditPackage(name, count, registryFlag) {
+  const registry = String(registryFlag ?? DEFAULT_REGISTRY).replace(/\/+$/, '');
+  const doc = await fetchPackument(registry, name, true);
+  if (!doc) throw new GuardError(`${name} is not on ${registry}`);
+  const time = doc.time ?? {};
+  const versions = Object.keys(doc.versions ?? {})
+    .map((v, i) => ({ v, i, t: Date.parse(time[v] ?? '') || 0 }))
+    .sort((a, b) => b.t - a.t || b.i - a.i)
+    .slice(0, count)
+    .map((x) => x.v);
+  const results = [];
+  for (const v of versions) {
+    const label = `${name}@${v}`;
+    const dist = doc.versions[v]?.dist ?? {};
+    try {
+      if (!dist.tarball) throw new GuardError('the packument has no dist.tarball');
+      const buf = await downloadTarball(dist.tarball, label);
+      if (dist.integrity?.startsWith('sha512-') && dist.integrity !== `sha512-${createHash('sha512').update(buf).digest('base64')}`) {
+        throw new GuardError('the downloaded tarball does not match dist.integrity');
+      }
+      const r = checkTarball(buf, label);
+      results.push({ version: v, published: time[v] ?? null, pass: r.pass, findings: r.findings.filter((f) => !f.allowed), warnings: r.warnings });
+    } catch (e) {
+      if (!(e instanceof GuardError)) throw e;
+      results.push({ version: v, published: time[v] ?? null, pass: false, error: e.message });
+    }
+  }
+  return { version: VERSION, package: name, registry, scanned: results.length, total: Object.keys(doc.versions ?? {}).length, results };
+}
+
+function formatAudit(a) {
+  const lines = [`shipsafe ${a.version} audit  ${a.package}  last ${a.scanned} of ${a.total} version(s) on ${a.registry}`];
+  for (const r of a.results) {
+    const when = r.published ? `  (${r.published.slice(0, 10)})` : '';
+    if (r.error) lines.push(`ERROR ${r.version}${when}: ${r.error}`);
+    else if (r.pass) lines.push(`PASS  ${r.version}${when}`);
+    else lines.push(`FAIL  ${r.version}${when}: ${[...new Set(r.findings.map((f) => f.rule))].join(', ')}`, ...r.findings.slice(0, 20).map((f) => `        ${f.rule.padEnd(18)} ${f.path}${f.detail ? `: ${f.detail}` : ''}`));
+  }
+  if (a.results.some((r) => !r.pass && !r.error)) lines.push('Leak found: follow /shipsafe:incident. Rotate any exposed credential before anything else.');
+  return lines.join('\n');
+}
+
 async function loadBaseline(nextOpened, against, oldFile, registryFlag) {
   if (oldFile) return { opened: openTarball(oldFile), source: resolve(oldFile) };
   const config = loadConfig(nextOpened.files);
@@ -543,14 +597,7 @@ async function loadBaseline(nextOpened, against, oldFile, registryFlag) {
   const version = doc?.['dist-tags']?.[spec] ?? (doc?.versions?.[spec] ? spec : null);
   const url = version ? doc.versions[version]?.dist?.tarball : null;
   if (!url) return { opened: null, source: `${name}@${spec} on ${registry}` };
-  let res;
-  try {
-    res = await fetch(url, { signal: AbortSignal.timeout(120000) });
-  } catch (e) {
-    throw new GuardError(`cannot download ${name}@${version}: ${e.cause?.code ?? e.message}`);
-  }
-  if (!res.ok) throw new GuardError(`downloading ${name}@${version} answered HTTP ${res.status}`);
-  return { opened: openTarball(Buffer.from(await res.arrayBuffer())), source: `${name}@${version} (${spec}) on ${registry}` };
+  return { opened: openTarball(await downloadTarball(url, `${name}@${version}`)), source: `${name}@${version} (${spec}) on ${registry}` };
 }
 
 function formatDiff(d, source) {
@@ -882,6 +929,8 @@ Usage:
                                        exit 0 only if the registry's dist.integrity for name@version equals this file
   shipsafe diff <new.tgz> [<old.tgz> | --against <name@version|dist-tag>] [--registry <url>] [--json | --format markdown]
                                        list added, removed and grown files and label risk-raising changes (default: against latest)
+  shipsafe audit <name> [--versions <n>] [--registry <url>] [--json]
+                                       incident tool: download and gate the last n published versions (default 5)
   shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin)
   shipsafe --version
 
@@ -985,12 +1034,40 @@ function runCheck(rest) {
   return code;
 }
 
+async function runAudit(rest) {
+  const { format, args } = takeFormat(rest);
+  let registry;
+  let count = 5;
+  const names = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--registry') registry = args[++i];
+    else if (a.startsWith('--registry=')) registry = a.slice(11);
+    else if (a === '--versions') count = Number(args[++i]);
+    else if (a.startsWith('--versions=')) count = Number(a.slice(11));
+    else names.push(a);
+  }
+  const bad = names.length !== 1 || names[0].startsWith('-') || !Number.isInteger(count) || count < 1 || (registry !== undefined && !/^https?:\/\//.test(registry));
+  if (bad || (format !== 'text' && format !== 'json')) { console.error(USAGE); return 2; }
+  try {
+    const a = await auditPackage(names[0], count, registry);
+    console.log(format === 'json' ? JSON.stringify(a, null, 2) : formatAudit(a));
+    if (a.results.some((r) => r.error)) return 2;
+    return a.results.every((r) => r.pass) ? 0 : 1;
+  } catch (e) {
+    if (!(e instanceof GuardError)) throw e;
+    console.error(`shipsafe: ${e.message}`);
+    return 2;
+  }
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === '--version' || cmd === '-v') { console.log(VERSION); return 0; }
   if (cmd === 'hook') return runHook();
   if (cmd === 'verify') return runVerify(rest);
   if (cmd === 'diff') return runDiff(rest);
+  if (cmd === 'audit') return runAudit(rest);
   if (cmd === 'check') return runCheck(rest);
   console.error(USAGE);
   return cmd === undefined || cmd === '--help' || cmd === '-h' ? 0 : 2;

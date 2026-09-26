@@ -438,3 +438,27 @@ test('check emits SARIF 2.1.0 and a markdown summary', () => {
   assert.match(md.stdout, /File inventory \(\d+\)/);
   assert.equal(spawnSync('node', [CLI, 'check', good, '--format', 'xml'], { encoding: 'utf8' }).status, 2);
 });
+
+test('audit gates the last N published versions from a registry', async () => {
+  const v1 = readFileSync(pack('audit-v1', { 'index.js': 'x\n' }, { name: 'auditpkg' }));
+  const v2 = readFileSync(pack('audit-v2', { 'index.js': 'x\n', 'index.js.map': '{}' }, { name: 'auditpkg', version: '1.1.0' }));
+  const v3 = readFileSync(pack('audit-v3', { 'index.js': 'y\n' }, { name: 'auditpkg', version: '1.2.0' }));
+  const sri = (b) => `sha512-${createHash('sha512').update(b).digest('base64')}`;
+  const doc = { name: 'auditpkg', time: { '1.0.0': '2026-01-01T00:00:00Z', '1.1.0': '2026-02-01T00:00:00Z', '1.2.0': '2026-03-01T00:00:00Z' }, versions: {} };
+  await withRegistry({ auditpkg: doc, '-/1.0.0.tgz': v1, '-/1.1.0.tgz': v2, '-/1.2.0.tgz': v3 }, async (registry) => {
+    for (const [v, b] of [['1.0.0', v1], ['1.1.0', v2], ['1.2.0', v3]]) doc.versions[v] = { dist: { tarball: `${registry}/-/${v}.tgz`, integrity: sri(b) } };
+    const two = await runAsync(['audit', 'auditpkg', '--versions', '2', '--registry', registry, '--json']);
+    assert.equal(two.code, 1, two.stderr);
+    const a = JSON.parse(two.stdout);
+    assert.deepEqual(a.results.map((r) => [r.version, r.pass]), [['1.2.0', true], ['1.1.0', false]]);
+    assert.equal(a.results[1].findings[0].rule, 'source-map');
+    const text = await runAsync(['audit', 'auditpkg', '--versions=1', '--registry', registry]);
+    assert.equal(text.code, 0);
+    assert.match(text.stdout, /PASS  1\.2\.0/);
+    doc.versions['1.2.0'].dist.integrity = sri(v1);
+    const tampered = await runAsync(['audit', 'auditpkg', '--versions', '1', '--registry', registry]);
+    assert.equal(tampered.code, 2);
+    assert.match(tampered.stdout, /does not match dist\.integrity/);
+    assert.equal((await runAsync(['audit', 'nope', '--registry', registry])).code, 2);
+  });
+});

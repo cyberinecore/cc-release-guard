@@ -1,6 +1,6 @@
 ---
 name: help
-description: This skill should be used when the request names shipsafe but not which `/shipsafe:*` command answers it - "shipsafe lam duoc gi", "which shipsafe command", "shipsafe co command nao", "dung shipsafe the nao", "how do I use shipsafe". Routes to the one skill that answers it (release, init, check, verify). Never fires without a shipsafe anchor - a bare "publish" goes to /shipsafe:release directly.
+description: This skill should be used when the request names shipsafe but not which `/shipsafe:*` command answers it - "shipsafe lam duoc gi", "which shipsafe command", "shipsafe co command nao", "dung shipsafe the nao", "how do I use shipsafe". Routes to the one skill that answers it (release, init, check, verify, incident). Never fires without a shipsafe anchor - a bare "publish" goes to /shipsafe:release directly.
 ---
 
 # shipsafe help
@@ -13,6 +13,7 @@ Pick the one command that answers the request, say why in one line, then follow 
 | Set a repo up so its releases are safe (files allowlist, no source maps, prepack build, CI gate) | `/shipsafe:init` |
 | Know whether a package would leak, without publishing | `/shipsafe:check` |
 | Prove a finished publish shipped exactly the checked tarball | `/shipsafe:verify` |
+| Respond to a leak already on npm (scan published versions, rotate, unpublish or deprecate) | `/shipsafe:incident` |
 
 Always on, no command: the PreToolUse hook. Whenever Claude runs `npm`, `pnpm`, `bun` or `yarn` publish, it denies a publish that does not name a `.tgz`, re-runs the gate on the named tarball and denies it on any finding, denies publishes whose flags contradict the packed metadata (scoped without `--access`, registry mismatch, prerelease to `latest`), and always denies `yarn npm publish` and release orchestrators that publish on their own (`lerna`, `changeset`, `semantic-release`, `release-it`, `np`). It never approves anything, so the normal permission prompt still applies to a clean publish. It cannot see publishes inside `npm run <script>`, scripts, or terminals outside Claude Code; the CI gate covers those.
 

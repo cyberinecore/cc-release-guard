@@ -87,6 +87,7 @@ Publish the file the gate checked, never the working tree: `npm pack --dry-run` 
 - Release orchestrators that pack and publish on their own (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`) are denied outside their dry-run modes, with a pack, gate, publish-each-tarball recipe. `npm stage publish <file>.tgz` is gated like `npm publish`. Publishes inside `npm run <script>`, Makefiles, or a CI job are not intercepted.
 - The hook looks through `sh|bash|zsh -c`, `eval`, `npx`, `bunx`, `corepack` and `npm|pnpm|yarn exec|dlx`. A publish fed its tarball by `xargs` or `find -exec` is always denied, because the file that ships cannot be known before it runs.
 - Static deploys: the hook gates `wrangler pages deploy <dir>` (or `pages_build_output_dir` from `wrangler.toml`/`wrangler.json`), `vercel [deploy] --prebuilt` (`.vercel/output/static`), `netlify deploy --dir <dir>` (or `publish` from `netlify.toml`) and `firebase deploy` including hosting (`hosting.public` from `firebase.json`). A deploy whose directory cannot be determined is denied with a hint. `vercel deploy` without `--prebuilt` builds remotely from source and is not gated.
+- GitHub releases: `gh release create|upload` is denied when an attached `.tgz`/`.tar.gz` fails the gate (a tarball without a root `package.json` gets the leak rules only), and when an attached archive shipsafe cannot read yet (`.zip`, `.jar`, ...). Other assets such as binaries and checksums pass unscanned.
 - npm packages and static sites only for now. PyPI and crates.io are planned.
 
 ## License

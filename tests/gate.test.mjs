@@ -494,3 +494,26 @@ test('check-dir and the deploy hook guard static build output', () => {
   assert.match(hook('wrangler pages deploy missing', site).permissionDecisionReason, /not found/);
   assert.equal(hook('wrangler deploy', site), null);
 });
+
+test('gh release create and upload gate attached tarballs', () => {
+  const rel = join(root, 'release');
+  mkdirSync(rel, { recursive: true });
+  const leakyTar = join(rel, 'bundle.tar.gz');
+  const cleanTar = join(rel, 'clean.tgz');
+  const inner = join(rel, 'inner');
+  mkdirSync(join(inner, 'bundle'), { recursive: true });
+  writeFileSync(join(inner, 'bundle/app.js'), 'a()\n');
+  writeFileSync(join(inner, 'bundle/app.js.map'), '{}');
+  execFileSync('tar', ['-czf', leakyTar, '-C', inner, 'bundle']);
+  execFileSync('tar', ['-czf', cleanTar, '-C', inner, 'bundle/app.js']);
+  writeFileSync(join(rel, 'app.zip'), 'PK\n');
+  writeFileSync(join(rel, 'SHA256SUMS'), 'x\n');
+  assert.match(hook(`gh release create v1 ${leakyTar}#Bundle --notes "x"`, rel).permissionDecisionReason, /source-map/);
+  assert.equal(hook(`gh release create v1 clean.tgz SHA256SUMS -t "v1" --generate-notes`, rel), null);
+  assert.equal(hook(`gh release upload v1 ${good}`, rel), null);
+  assert.match(hook(`gh release upload v1 ${leaky} --clobber`).permissionDecisionReason, /source-map/);
+  assert.match(hook('gh release upload v1 *.tar.gz', rel).permissionDecisionReason, /source-map/);
+  assert.match(hook('gh release create v1 app.zip', rel).permissionDecisionReason, /cannot scan yet/);
+  assert.equal(hook('gh release create v1 --generate-notes', rel), null);
+  assert.equal(hook('gh release view v1', rel), null);
+});

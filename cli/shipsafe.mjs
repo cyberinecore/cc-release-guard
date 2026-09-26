@@ -367,10 +367,11 @@ function openTarball(file) {
   return { raw, entries, files };
 }
 
-export function checkTarball(file, label) {
+export function checkTarball(file, label, { asset = false } = {}) {
   const { raw, entries, files } = openTarball(file);
   const sha256 = createHash('sha256').update(raw).digest('hex');
-  const config = loadConfig(files);
+  const generic = asset && !files.some((f) => f.path === 'package.json');
+  const config = generic ? parseConfig({}) : loadConfig(files);
   const findings = [];
   const warnings = [...config.warnings];
   const integrity = new Map();
@@ -388,6 +389,7 @@ export function checkTarball(file, label) {
   }
   const record = (path, hits) => {
     for (const [rule, detail] of hits) {
+      if (generic && !DIR_RULES.has(rule)) continue;
       const allow = config.allow.find((a) => a.rule === rule && a.re.test(path));
       if (allow) allow.used = true;
       findings.push({ rule, path, detail, allowed: !!allow, reason: allow?.reason });
@@ -421,7 +423,7 @@ export function checkTarball(file, label) {
   const report = {
     version: VERSION,
     file: label ?? resolve(file),
-    package: `${config.name}@${config.version}`,
+    package: generic ? 'release asset (no package.json)' : `${config.name}@${config.version}`,
     manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
     files: files.length,
@@ -878,6 +880,28 @@ function findDeploy(prog, args, cwd) {
   }
   return null;
 }
+const GH_VALUE_OPTS = new Set(['-t', '--title', '-n', '--notes', '-F', '--notes-file', '--target', '--discussion-category', '-R', '--repo', '--notes-start-tag', '--notes-from-tag']);
+const SCANNABLE_ASSET = /\.(tgz|tar\.gz)$/i;
+
+function findReleaseAssets(args, cwd) {
+  const pos = deployPositionals(args, GH_VALUE_OPTS);
+  if (pos[0] !== 'release' || !['create', 'upload'].includes(pos[1])) return null;
+  const assets = [];
+  for (const raw of pos.slice(3)) {
+    const arg = raw.replace(/#[^/]*$/, '');
+    if (/[$`]/.test(arg)) return { error: `release asset "${arg}" uses shell expansion; name each asset literally` };
+    const full = expandPath(arg, cwd);
+    if (/[*?]/.test(basename(full))) {
+      const dir = dirname(full);
+      const re = globToRegex(basename(full));
+      assets.push(...(existsSync(dir) ? readdirSync(dir).filter((n) => re.test(n)).map((n) => resolve(dir, n)) : []));
+    } else {
+      assets.push(full);
+    }
+  }
+  return assets.length ? { assets } : null;
+}
+
 const ORCHESTRATORS = new Set(['lerna', 'changeset', 'semantic-release', 'release-it', 'np']);
 const ORCHESTRATOR_SAFE_FLAGS = new Set(['--help', '-h', '--version', '-v', '-V', '--dry-run', '-d', '--preview', '--no-publish', '--no-npm', '--no-npm.publish', '--npm.publish=false']);
 
@@ -953,6 +977,11 @@ function scanSegment(seg, cwd, ctx) {
     nested(stripRunnerOpts(t.slice(1), { ...ctx, cwd, depth: ctx.depth + 1 }));
     return cwd;
   }
+  if (prog === 'gh') {
+    const r = findReleaseAssets(t.slice(1), cwd);
+    if (r) ctx.out.push({ ...r, manager: 'gh release', cwd, dryRun: false, computed: ctx.computed, release: true });
+    return cwd;
+  }
   if (prog in DEPLOY_VALUE_OPTS || prog === 'ntl') {
     const d = findDeploy(prog, t.slice(1), cwd);
     if (d) ctx.out.push({ ...d, cwd, dryRun: false, computed: ctx.computed, deploy: true });
@@ -1013,7 +1042,27 @@ function evaluateDeploy(p) {
   return null;
 }
 
+function evaluateRelease(p) {
+  if (p.error) return p.error;
+  for (const file of p.assets) {
+    if (!SCANNABLE_ASSET.test(file)) {
+      if (NESTED_ARCHIVE.test(file)) return `release asset ${file} is an archive shipsafe cannot scan yet. Check its contents yourself, or attach a .tgz that passes \`shipsafe check\`.`;
+      continue;
+    }
+    if (!existsSync(file) || !statSync(file).isFile()) return `release asset not found: ${file}`;
+    let r;
+    try {
+      r = checkTarball(file, undefined, { asset: true });
+    } catch (e) {
+      return `shipsafe could not check ${file}: ${e.message}`;
+    }
+    if (!r.pass) return `shipsafe check failed for release asset ${file}:\n${formatReport(r)}`;
+  }
+  return null;
+}
+
 function evaluatePublish(p) {
+  if (p.release) return evaluateRelease(p);
   if (p.deploy) return evaluateDeploy(p);
   const cmd = `${p.manager} publish`;
   if (p.dryRun) return null;

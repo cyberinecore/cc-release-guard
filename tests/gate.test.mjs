@@ -264,3 +264,17 @@ test('entry points in main, types, bin and exports must exist in the tarball', (
   assert.deepEqual(rules(bad.report), ['entry-point']);
   assert.deepEqual(bad.report.findings.map((f) => f.path).sort(), ['package.json#bin', 'package.json#exports["./x/*"][0]', 'package.json#exports["."]["node"]["import"]', 'package.json#main'].sort());
 });
+
+test('release orchestrators are denied with a pack-gate-publish hint; npm stage publish is gated', () => {
+  for (const c of ['lerna publish', 'npx lerna publish from-git', 'changeset publish', 'pnpm changeset publish', 'yarn changeset publish', 'npx semantic-release', 'semantic-release --ci', 'release-it', 'np', 'npx np 2.0.0']) {
+    const r = hook(c);
+    assert.equal(r?.permissionDecision, 'deny', c);
+    assert.match(r.permissionDecisionReason, /shipsafe check out\/\*\.tgz/, c);
+  }
+  for (const c of ['lerna version', 'changeset version', 'semantic-release --dry-run', 'release-it --dry-run', 'np --preview', 'np --no-publish', 'release-it --no-npm', 'lerna publish --help']) {
+    assert.equal(hook(c), null, c);
+  }
+  assert.equal(hook('npm stage publish')?.permissionDecision, 'deny');
+  assert.equal(hook(`npm stage publish ${good}`), null);
+  assert.match(hook(`npm stage publish ${leaky}`).permissionDecisionReason, /source-map/);
+});

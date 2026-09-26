@@ -446,6 +446,14 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
 const RUNNER_VALUE_OPTS = new Set(['-p', '--package', '--shell-mode']);
 const XARGS_VALUE_OPTS = new Set(['-I', '-J', '-L', '-n', '-P', '-s', '-E', '-d', '-a', '-R', '-S']);
 const MAX_NESTING = 8;
+const ORCHESTRATORS = new Set(['lerna', 'changeset', 'semantic-release', 'release-it', 'np']);
+const ORCHESTRATOR_SAFE_FLAGS = new Set(['--help', '-h', '--version', '-v', '-V', '--dry-run', '-d', '--preview', '--no-publish', '--no-npm', '--no-npm.publish', '--npm.publish=false']);
+
+function orchestratorPublishes(prog, args) {
+  if (args.some((a) => ORCHESTRATOR_SAFE_FLAGS.has(a))) return false;
+  if (prog === 'lerna' || prog === 'changeset') return args[firstPositional(args)] === 'publish';
+  return true;
+}
 
 function firstPositional(args) {
   for (let i = 0; i < args.length; i++) {
@@ -513,9 +521,14 @@ function scanSegment(seg, cwd, ctx) {
     nested(stripRunnerOpts(t.slice(1), { ...ctx, cwd, depth: ctx.depth + 1 }));
     return cwd;
   }
+  if (ORCHESTRATORS.has(prog)) {
+    if (orchestratorPublishes(prog, t.slice(1))) ctx.out.push({ cwd, dryRun: false, computed: false, manager: prog === 'lerna' || prog === 'changeset' ? `${prog} publish` : prog, orchestrator: true });
+    return cwd;
+  }
   if (!MANAGERS.has(prog)) return cwd;
   const args = t.slice(1);
   const first = firstPositional(args);
+  if (first !== -1 && ORCHESTRATORS.has(args[first])) return nested(args.slice(first));
   if (first !== -1 && RUNNER_SUBCOMMANDS.has(args[first]) && !(prog === 'yarn' && args[first] === 'x')) {
     nested(stripRunnerOpts(args.slice(first + 1), { ...ctx, cwd, depth: ctx.depth + 1 }));
     return cwd;
@@ -529,6 +542,10 @@ function scanSegment(seg, cwd, ctx) {
   }
   const idx = pos.indexOf('publish');
   if (idx === -1) return cwd;
+  if (prog === 'npm' && idx === 1 && pos[0] === 'stage') {
+    ctx.out.push({ ...base, manager: 'npm stage', tarballArg: pos[2] ?? null, unsupported: false });
+    return cwd;
+  }
   if (idx > 0 && NON_PUBLISH_COMMANDS.has(pos[0])) return cwd;
   ctx.out.push({ ...base, manager: prog, tarballArg: pos[idx + 1] ?? null, unsupported: false });
   return cwd;
@@ -547,6 +564,7 @@ export function findPublishes(command, startCwd) {
 function evaluatePublish(p) {
   const cmd = `${p.manager} publish`;
   if (p.dryRun) return null;
+  if (p.orchestrator) return `\`${p.manager}\` packs and publishes on its own, so shipsafe never sees what ships. Pack each package (\`npm pack --workspaces --pack-destination out\`), gate them with \`shipsafe check out/*.tgz\`, then publish each checked file with \`npm publish out/<file>.tgz\`. Dry runs (\`--dry-run\`) pass.`;
   if (p.computed) return `\`${cmd}\` gets its tarball from xargs or find, so shipsafe cannot see which file ships. Name the checked .tgz literally: \`${cmd} <file>.tgz\`.`;
   if (p.unsupported) return `\`${cmd}\` cannot publish a prebuilt tarball. Pack, run \`shipsafe check <file>.tgz\`, then publish that file with \`npm publish <file>.tgz\`.`;
   if (!p.tarballArg) return `\`${cmd}\` without a tarball publishes the working tree, which nothing has checked. Build, pack (\`npm pack\`), run \`shipsafe check <file>.tgz\`, then \`${cmd} <file>.tgz\`.`;

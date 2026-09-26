@@ -73,6 +73,7 @@ Publish the file the gate checked, never the working tree: `npm pack --dry-run` 
 
 - The hook sees commands Claude runs. A publish inside `npm run release`, a script, or a terminal outside Claude Code is not intercepted; run the gate in CI for those.
 - Command matching is best-effort by design: it targets accidents, not a user deliberately bypassing it.
+- Release orchestrators that pack and publish on their own (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`) are denied outside their dry-run modes, with a pack, gate, publish-each-tarball recipe. `npm stage publish <file>.tgz` is gated like `npm publish`. Publishes inside `npm run <script>`, Makefiles, or a CI job are not intercepted.
 - The hook looks through `sh|bash|zsh -c`, `eval`, `npx`, `bunx`, `corepack` and `npm|pnpm|yarn exec|dlx`. A publish fed its tarball by `xargs` or `find -exec` is always denied, because the file that ships cannot be known before it runs.
 - npm only for now. PyPI and crates.io are planned.
 

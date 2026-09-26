@@ -423,7 +423,7 @@ function runHook() {
 const USAGE = `shipsafe ${VERSION}
 
 Usage:
-  shipsafe check <file.tgz> [--json]   scan a packed npm tarball; exit 1 on any finding
+  shipsafe check <file.tgz>... [--json] scan packed npm tarballs; exit 1 on any finding, 2 on any error
   shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin)
   shipsafe --version
 
@@ -437,16 +437,30 @@ function main(argv) {
   if (cmd === 'check') {
     const json = rest.includes('--json');
     const files = rest.filter((a) => a !== '--json');
-    if (files.length !== 1) { console.error(USAGE); return 2; }
-    try {
-      const r = checkTarball(files[0]);
-      console.log(json ? JSON.stringify(r, null, 2) : formatReport(r));
-      return r.pass ? 0 : 1;
-    } catch (e) {
-      if (!(e instanceof GuardError) && e.code !== 'ENOENT' && e.code !== 'EISDIR') throw e;
-      console.error(`shipsafe: ${e.message}`);
-      return 2;
+    if (!files.length || files.some((f) => f.startsWith('-'))) { console.error(USAGE); return 2; }
+    const reports = [];
+    let code = 0;
+    for (const [i, file] of files.entries()) {
+      if (!json && i > 0) console.log('');
+      try {
+        const r = checkTarball(file);
+        reports.push(r);
+        if (!json) console.log(formatReport(r));
+        if (!r.pass) code = Math.max(code, 1);
+      } catch (e) {
+        if (!(e instanceof GuardError) && e.code !== 'ENOENT' && e.code !== 'EISDIR') throw e;
+        console.error(`shipsafe: ${files.length > 1 ? `${file}: ` : ''}${e.message}`);
+        reports.push({ version: VERSION, file: resolve(file), pass: false, error: e.message });
+        code = 2;
+      }
     }
+    if (json) {
+      const out = files.length === 1 ? reports[0] : reports;
+      if (!out.error) console.log(JSON.stringify(out, null, 2));
+    } else if (files.length > 1) {
+      console.log(`\n${reports.filter((r) => r.pass).length}/${files.length} tarball(s) passed`);
+    }
+    return code;
   }
   console.error(USAGE);
   return cmd === undefined || cmd === '--help' || cmd === '-h' ? 0 : 2;

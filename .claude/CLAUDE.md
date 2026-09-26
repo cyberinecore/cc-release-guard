@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - All tests: `npm test` (runs `node --test tests/*.test.mjs`; `node --test tests/` fails because Node treats the dir as a module).
 - One test: `node --test --test-name-pattern "inline and remote" tests/gate.test.mjs`
-- Gate a tarball: `node cli/shipsafe.mjs check <file.tgz> [--json]` (exit 0 pass, 1 findings, 2 usage/config error).
+- Gate a tarball: `node cli/shipsafe.mjs check <file.tgz>... [--json]` (exit 0 all pass, 1 any findings, 2 any usage/config error; `--json` gives an array for several files).
 - Dogfood the CLI package: `cd cli && npm pack --pack-destination /tmp && node shipsafe.mjs check /tmp/cyberinecore-shipsafe-<version>.tgz` must PASS.
 - Validate the plugin: `claude plugin validate . --strict` and `claude plugin validate .claude-plugin/plugin.json --strict` (neither parses skill frontmatter). This file sits in `.claude/` because a root `CLAUDE.md` makes the strict plugin validation fail.
 - Live hook check: `echo "<prompt>" | claude -p --model haiku --plugin-dir . --allowedTools "Bash(npm publish *)"` from a temp dir holding a `"private": true` package and `--registry http://127.0.0.1:9`, so a hook failure still cannot publish. Pass the prompt on stdin: `--allowedTools` is variadic and swallows a positional prompt.

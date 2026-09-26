@@ -117,3 +117,20 @@ test('the hook allows only a tarball that passes the gate', () => {
   assert.equal(hook('npm publish missing-9.9.9.tgz')?.permissionDecision, 'deny');
   assert.equal(hook('npm publish $TGZ')?.permissionDecision, 'deny');
 });
+
+test('check accepts several tarballs and exits with the worst result', () => {
+  const both = spawnSync('node', [CLI, 'check', good, leaky], { encoding: 'utf8' });
+  assert.equal(both.status, 1);
+  assert.equal(both.stdout.match(/^shipsafe \d/gm).length, 2);
+  assert.match(both.stdout, /1\/2 tarball\(s\) passed/);
+  const json = spawnSync('node', [CLI, 'check', good, good, '--json'], { encoding: 'utf8' });
+  assert.equal(json.status, 0);
+  const reports = JSON.parse(json.stdout);
+  assert.ok(Array.isArray(reports));
+  assert.equal(reports.length, 2);
+  assert.ok(reports.every((r) => r.pass));
+  const missing = spawnSync('node', [CLI, 'check', leaky, join(root, 'missing.tgz'), '--json'], { encoding: 'utf8' });
+  assert.equal(missing.status, 2);
+  assert.equal(JSON.parse(missing.stdout)[1].error.length > 0, true);
+  assert.equal(check(good).report.pass, true);
+});

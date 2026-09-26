@@ -28,6 +28,8 @@ The repo root is simultaneously the plugin root and a single-plugin marketplace 
 
 Key design decisions (do not reverse without the user):
 
+- PyPI and crates.io (user answers 2026-09-27 after a Codex/Command Code/Muse round): wheels read config from the nearest on-disk `pyproject.toml` whose `[project].name` matches the wheel, never from a flag; `cargo publish` always asks, because the checked `.crate` and the uploaded one are separate packaging runs; `.pdb`/`.dSYM` are `native-debug-info` findings, unstripped native extensions only warn.
+
 - Naming: brand, plugin and marketplace are `shipsafe`; the npm package is `@cyberinecore/shipsafe` (bin `shipsafe`). Every executable reference (npm scope, GitHub repo, marketplace, Action) uses the one handle `cyberinecore`, because the GitHub name `cyberine` belongs to someone else and a `@cyberine` npm scope would invite users to guess `github.com/cyberine/...`. Docs always spell out full install commands.
 - No receipts/hash cache: the hook re-scans the exact tarball at publish time, so nothing can be forged or go stale.
 - `check-dir` (static-site output) reads config from the nearest `package.json` at or above the directory, not from a file inside it, so nothing extra deploys to the CDN. It applies only the leak rules in `DIR_RULES`.

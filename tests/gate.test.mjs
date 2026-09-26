@@ -745,3 +745,39 @@ test('Rust crates: packed Cargo.toml config and swept directories', (t) => {
   assert.equal(c.report.package, 'rs-probe@0.1.0 (crate)');
   assert.deepEqual(rules(c.report), ['file-size', 'secret-token', 'vcs-dir']);
 });
+
+test('the hook asks before Python and Rust publishes that were not checked', (t) => {
+  const proj = pyProject('py-hook', { 'src/py_hook/app.js.map': '{}' });
+  if (!proj) { t.skip('uv build is not available'); return; }
+  const cleanProj = pyProject('py-hook-clean', {});
+  assert.match(hook(`twine upload ${proj.wheel}`).permissionDecisionReason, /source-map/);
+  assert.equal(hook(`python3 -m twine upload -r testpypi ${cleanProj.wheel} ${cleanProj.sdist}`), null);
+  assert.equal(hook(`uvx twine upload ${cleanProj.dir}/dist/*`), null);
+  assert.match(hook('uv publish', proj.dir).permissionDecisionReason, /source-map/);
+  assert.equal(hook('uv publish', cleanProj.dir), null);
+  assert.equal(hook('uv publish --dry-run', proj.dir), null);
+  assert.match(hook('uv publish', root).permissionDecisionReason, /holds no wheel or sdist/);
+  assert.match(hook('twine upload nothing/*.whl').permissionDecisionReason, /matches no file/);
+  assert.equal(hook('poetry publish', cleanProj.dir), null);
+  for (const c of ['poetry publish --build', 'pdm publish', 'flit publish', 'maturin publish', 'hatch publish']) {
+    assert.equal(hook(c, cleanProj.dir)?.permissionDecision, 'ask', c);
+  }
+  assert.equal(hook('pdm publish --no-build', cleanProj.dir), null);
+  const crateDir = join(root, 'rs-hook');
+  mkdirSync(join(crateDir, 'src'), { recursive: true });
+  writeFileSync(join(crateDir, 'Cargo.toml'), '[package]\nname = "rs-hook"\nversion = "0.2.0"\nedition = "2021"\ndescription = "x"\nlicense = "MIT"\n');
+  writeFileSync(join(crateDir, 'src/main.rs'), 'fn main() {}\n');
+  const before = hook('cargo publish', crateDir);
+  assert.equal(before?.permissionDecision, 'ask');
+  assert.match(before.permissionDecisionReason, /not guaranteed to be byte-identical/);
+  assert.match(before.permissionDecisionReason, /No checked package yet/);
+  assert.match(before.permissionDecisionReason, /--locked/);
+  if (spawnSync('cargo', ['package', '--allow-dirty', '--no-verify', '-q'], { cwd: crateDir }).status === 0) {
+    const after = hook('cargo publish --locked', crateDir);
+    assert.equal(after?.permissionDecision, 'ask');
+    assert.match(after.permissionDecisionReason, /rs-hook-0\.2\.0\.crate \(sha256 [0-9a-f]{64}\) passes the gate/);
+    assert.doesNotMatch(after.permissionDecisionReason, /Publish with --locked/);
+  }
+  assert.equal(hook('cargo publish --dry-run', crateDir), null);
+  assert.equal(hook('cargo build --release', crateDir), null);
+});

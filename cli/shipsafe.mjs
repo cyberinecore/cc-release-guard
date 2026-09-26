@@ -1281,10 +1281,10 @@ function resolveTarball(arg, cwd) {
   return { path: full };
 }
 
-const RUNNERS = new Set(['npx', 'bunx', 'pnpx', 'corepack']);
+const RUNNERS = new Set(['npx', 'bunx', 'pnpx', 'corepack', 'uvx']);
 const RUNNER_SUBCOMMANDS = new Set(['exec', 'x', 'dlx']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
-const RUNNER_VALUE_OPTS = new Set(['-p', '--package', '--shell-mode']);
+const RUNNER_VALUE_OPTS = new Set(['-p', '--package', '--shell-mode', '--from', '--with', '--python', '--spec', '--index', '--project', '--directory']);
 const XARGS_VALUE_OPTS = new Set(['-I', '-J', '-L', '-n', '-P', '-s', '-E', '-d', '-a', '-R', '-S']);
 const MAX_NESTING = 8;
 const DEPLOY_VALUE_OPTS = {
@@ -1386,12 +1386,94 @@ function expandAssets(args, cwd) {
     if (/[*?]/.test(basename(full))) {
       const dir = dirname(full);
       const re = globToRegex(basename(full));
-      assets.push(...(existsSync(dir) ? readdirSync(dir).filter((n) => re.test(n)).map((n) => resolve(dir, n)) : []));
+      const matches = existsSync(dir) ? readdirSync(dir).filter((n) => re.test(n)).map((n) => resolve(dir, n)) : [];
+      if (!matches.length) return { error: `"${arg}" matches no file; build first, then check and upload the files by name` };
+      assets.push(...matches);
     } else {
       assets.push(full);
     }
   }
   return assets.length ? { assets } : null;
+}
+
+const PY_RS_PUBLISHERS = new Set(['twine', 'uv', 'poetry', 'hatch', 'pdm', 'flit', 'maturin', 'cargo']);
+const PY_VALUE_OPTS = new Set(['-r', '--repository', '--repository-url', '-u', '--username', '-p', '--password', '--sign-with', '-i', '--identity', '-c', '--comment',
+  '--config-file', '--cert', '--client-cert', '--index', '--publish-url', '--check-url', '-t', '--token', '--trusted-publishing', '--keyring-provider',
+  '--directory', '--project', '--cache-dir', '--dist-dir', '-P', '-C', '--repo', '--user', '-a', '--auth', '--ca-cert', '--client-key', '--publisher', '-o', '--option',
+  '-d', '--dest', '-k', '--skip', '--ca-certs', '--format', '--pypirc', '--manifest-path', '--registry', '--index', '--target-dir', '--package', '--features', '-F', '-j', '--jobs', '--target', '--token']);
+
+function distArtifacts(dir) {
+  return existsSync(dir) ? readdirSync(dir).filter((n) => /\.(whl|tar\.gz)$/.test(n)).sort().map((n) => join(dir, n)) : [];
+}
+
+function findPyRsPublish(prog, args, cwd) {
+  const pos = deployPositionals(args, PY_VALUE_OPTS);
+  const has = (...flags) => args.some((a) => flags.includes(a));
+  const opt = (...names) => names.map((n) => optionValue(args, n)).find((v) => v !== undefined);
+  const base = opt('--directory', '--project', '-C', '-P') ? resolve(cwd, opt('--directory', '--project', '-C', '-P')) : cwd;
+  const fromDir = (manager, dir) => {
+    const assets = distArtifacts(dir);
+    return assets.length ? { manager, assets } : { manager, error: `\`${manager}\` would upload ${dir}, which holds no wheel or sdist. Build, run \`shipsafe check\` on each file, then upload them.` };
+  };
+  const hint = (manager, how) => ({ manager, error: `\`${manager}\` ${how}, so shipsafe never sees what ships. Build first (\`uv build\` or \`python -m build\`), run \`shipsafe check dist/*\`, then upload exactly those files with \`twine upload dist/*\` or \`uv publish dist/*\`.` });
+  if (prog === 'twine') {
+    if (pos[0] !== 'upload') return null;
+    return pos.length > 1 ? { manager: 'twine upload', ...expandAssets(pos.slice(1), cwd) } : { manager: 'twine upload', error: '`twine upload` names no file; name the checked wheels and sdists.' };
+  }
+  if (prog === 'uv') {
+    if (pos[0] !== 'publish' || has('--dry-run')) return null;
+    return pos.length > 1 ? { manager: 'uv publish', ...expandAssets(pos.slice(1), base) } : fromDir('uv publish', join(base, 'dist'));
+  }
+  if (prog === 'poetry') {
+    if (pos[0] !== 'publish' || has('--dry-run')) return null;
+    if (has('--build')) return hint('poetry publish --build', 'builds during the upload');
+    return fromDir('poetry publish', resolve(base, opt('--dist-dir') ?? 'dist'));
+  }
+  if (prog === 'hatch') {
+    if (pos[0] !== 'publish') return null;
+    return pos.length > 1 ? { manager: 'hatch publish', ...expandAssets(pos.slice(1), cwd) } : { manager: 'hatch publish', error: '`hatch publish` names no artifact, and which directory it then uploads is not confirmed. Name the checked files: `hatch publish dist/<file>.whl dist/<file>.tar.gz`.' };
+  }
+  if (prog === 'pdm') {
+    if (pos[0] !== 'publish') return null;
+    if (!has('--no-build')) return hint('pdm publish', 'builds during the upload unless --no-build is given');
+    return fromDir('pdm publish --no-build', resolve(base, opt('-d', '--dest') ?? 'dist'));
+  }
+  if (prog === 'flit') return pos[0] === 'publish' ? hint('flit publish', 'always builds during the upload') : null;
+  if (prog === 'maturin') {
+    if (pos[0] === 'publish') return hint('maturin publish', 'builds during the upload');
+    if (pos[0] === 'upload') return pos.length > 1 ? { manager: 'maturin upload', ...expandAssets(pos.slice(1), cwd) } : { manager: 'maturin upload', error: '`maturin upload` names no file.' };
+    return null;
+  }
+  if (prog === 'cargo') {
+    if (pos[0] !== 'publish' || has('--dry-run', '-n')) return null;
+    const manifest = resolve(cwd, opt('--manifest-path') ?? 'Cargo.toml');
+    return { manager: 'cargo publish', cargo: true, manifest, targetDir: opt('--target-dir'), packageFlag: opt('-p', '--package'), locked: has('--locked') };
+  }
+  return null;
+}
+
+function evaluateCargo(p) {
+  const lines = ['`cargo publish` packages the working tree again and uploads that, not a file shipsafe checked, and two packaging runs are not guaranteed to be byte-identical.'];
+  let crate = null;
+  try {
+    const pkg = !p.packageFlag && existsSync(p.manifest) ? readTomlTable(readFileSync(p.manifest, 'utf8'), 'package', p.manifest) : {};
+    if (pkg.name && pkg.version) crate = join(p.targetDir ? resolve(p.cwd, p.targetDir) : join(dirname(p.manifest), 'target'), 'package', `${pkg.name}-${pkg.version}.crate`);
+  } catch {
+    crate = null;
+  }
+  if (!crate) lines.push('Could not locate the package from this command; check the .crate that `cargo package` writes under target/package/.');
+  else if (!existsSync(crate)) lines.push(`No checked package yet: run \`cargo package --locked\`, then \`shipsafe check ${crate}\`.`);
+  else {
+    try {
+      const r = checkTarball(crate);
+      lines.push(`${crate} (sha256 ${r.sha256}) ${r.pass ? 'passes the gate' : 'FAILS the gate'}${r.pass ? '' : `:\n${formatReport(r)}`}`);
+    } catch (e) {
+      lines.push(`${crate} could not be checked: ${e.message}`);
+    }
+  }
+  if (!p.locked) lines.push('Publish with --locked so dependency resolution matches the checked package.');
+  lines.push('Allow only if the tree has not changed since that check.');
+  return lines.join('\n');
 }
 
 const PUSH_VALUE_OPTS = new Set(['-s', '--source', '-k', '--api-key', '--symbol-source', '--symbol-api-key', '-t', '--timeout', '--host', '--otp', '--key',
@@ -1484,6 +1566,14 @@ function scanSegment(seg, cwd, ctx) {
     nested(stripRunnerOpts(t.slice(1), { ...ctx, cwd, depth: ctx.depth + 1 }));
     return cwd;
   }
+  if (/^python(\d(\.\d+)?)?$/.test(prog) && t[1] === '-m' && t[2]) return nested(t.slice(2));
+  if (prog === 'pipx' && t[1] === 'run') { nested(stripRunnerOpts(t.slice(2), { ...ctx, cwd, depth: ctx.depth + 1 })); return cwd; }
+  if (prog === 'uv' && (t[1] === 'run' || (t[1] === 'tool' && t[2] === 'run'))) { nested(stripRunnerOpts(t.slice(t[1] === 'run' ? 2 : 3), { ...ctx, cwd, depth: ctx.depth + 1 })); return cwd; }
+  if (PY_RS_PUBLISHERS.has(prog)) {
+    const r = findPyRsPublish(prog, t.slice(1), cwd);
+    if (r) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed, release: !r.cargo });
+    return cwd;
+  }
   if (['dotnet', 'nuget', 'gem', 'mvn', 'mvnw'].includes(prog)) {
     const r = findPackageUpload(prog, t.slice(1), cwd);
     if (r && (r.assets || r.error)) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed, release: true });
@@ -1574,6 +1664,7 @@ function evaluateRelease(p) {
 }
 
 function evaluatePublish(p) {
+  if (p.cargo) return evaluateCargo(p);
   if (p.release) return evaluateRelease(p);
   if (p.deploy) return evaluateDeploy(p);
   const cmd = `${p.manager} publish`;

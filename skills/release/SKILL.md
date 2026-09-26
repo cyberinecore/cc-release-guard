@@ -49,7 +49,7 @@ npm pack --pack-destination .local/release
 node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" check .local/release/<name>-<version>.tgz
 ```
 
-Make sure `.local/` is gitignored. The gate fails on any `*.map`, embedded `sourcesContent`, inline or remote source map, `.ts`/`.tsx` other than `.d.ts`, a `src/` or test path, a credential file (`.env*`, `.npmrc`, keys), a file over `maxFileBytes` (default 5 MiB), or a URL to a storage bucket (S3, R2, GCS, Azure Blob, Spaces, B2, Wasabi). Fix the build, not the gate. When a finding is genuinely intended, add an exception to `package.json` and show it to the user; every exception needs a reason and ships inside the package:
+Make sure `.local/` is gitignored. The gate fails on any `*.map`, embedded `sourcesContent`, inline or remote source map, `.ts`/`.tsx` other than `.d.ts`, a `src/` or test path, a credential file (`.env*`, `.npmrc`, `.netrc`, keys, keystores) or a credential string (AWS, GitHub, npm, Stripe, Slack tokens, PEM private keys), build metadata that lists source paths (`*.tsbuildinfo`, coverage, esbuild metafiles), a file over `maxFileBytes` (default 5 MiB), a URL to a storage bucket (S3, R2, GCS, Azure Blob, Spaces, B2, Wasabi), an install lifecycle script (`preinstall`/`install`/`postinstall`, or a shipped `binding.gyp`), a `main`/`types`/`bin`/`exports` target missing from the tarball, `"private": true`, and links or duplicate paths in the archive. Fix the build, not the gate. When a finding is genuinely intended, add an exception to `package.json` and show it to the user; every exception needs a reason and ships inside the package:
 
 ```json
 "shipsafe": { "allow": [{ "rule": "bucket-url", "path": "dist/*.js", "reason": "documented public download bucket" }] }
@@ -65,11 +65,11 @@ Everything above happens before the user fetches an OTP, because a code lasts ab
 ! npm publish /abs/path/<name>-<version>.tgz --access public --otp <code>
 ```
 
-The plugin's hook re-runs the gate on that exact file when Claude runs a publish command and blocks `npm publish` / `pnpm publish` / `bun publish` without a passing tarball, and `yarn npm publish` always (it cannot publish a prebuilt tarball). It does not see publishes hidden inside `npm run <script>` or run outside Claude Code, so CI must run the gate itself.
+The plugin's hook re-runs the gate on that exact file when Claude runs a publish command and blocks `npm publish` / `pnpm publish` / `bun publish` without a passing tarball (also behind `npx`, `corepack`, `bash -c`, `eval`), `yarn npm publish` always (it cannot publish a prebuilt tarball), release orchestrators (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`), a scoped package without an explicit `--access`, and a prerelease headed for the `latest` tag. It does not see publishes hidden inside `npm run <script>` or run outside Claude Code, so CI must run the gate itself.
 
 ## 5. After publish
 
-Compare what the registry holds with what was checked: `npm view <name>@<version> dist.integrity` must equal `sha512-$(openssl dgst -sha512 -binary <file>.tgz | base64)`.
+Prove the registry holds the checked file: `node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" verify /abs/path/<name>-<version>.tgz` must print MATCH (exit 0). Then smoke-test the published package without running its scripts, in a scratch directory: `npm install --ignore-scripts <name>@<version>` and import it (or run its `bin --version`). `/shipsafe:verify` carries the full procedure.
 
 ## CI
 
@@ -78,5 +78,8 @@ Run the same gate before any publish step, on the same file the publish step upl
 ```sh
 npm pack --pack-destination out
 npx --yes @cyberinecore/shipsafe@0.1.0 check out/*.tgz
-npm publish out/*.tgz --provenance --access public
+for f in out/*.tgz; do npm publish "$f" --provenance --access public; done
+for f in out/*.tgz; do npx --yes @cyberinecore/shipsafe@0.1.0 verify "$f"; done
 ```
+
+CI publishes never pass through the hook, so `verify` on the same file is the CI's proof that the reviewed artifact is the published one.

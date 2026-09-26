@@ -285,9 +285,8 @@ function scanContent(data) {
   return found;
 }
 
-export function checkTarball(file) {
+function openTarball(file) {
   const raw = readFileSync(file);
-  const sha256 = createHash('sha256').update(raw).digest('hex');
   let tar;
   try {
     tar = raw[0] === 0x1f && raw[1] === 0x8b ? gunzipSync(raw, { maxOutputLength: MAX_UNPACKED_BYTES }) : raw;
@@ -300,6 +299,12 @@ export function checkTarball(file) {
   const files = entries
     .filter((e) => e.type === '0' || e.type === '7')
     .map((e) => ({ path: stripRoot(e.path), size: e.size, data: e.data }));
+  return { raw, entries, files };
+}
+
+export function checkTarball(file) {
+  const { raw, entries, files } = openTarball(file);
+  const sha256 = createHash('sha256').update(raw).digest('hex');
   const config = loadConfig(files);
   const findings = [];
   const warnings = [...config.warnings];
@@ -360,6 +365,46 @@ export function checkTarball(file) {
     findings,
     warnings,
   };
+}
+
+const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
+
+export async function verifyTarball(file, registryFlag) {
+  const { raw, files } = openTarball(file);
+  const config = loadConfig(files);
+  const { name, version } = config;
+  if (typeof name !== 'string' || typeof version !== 'string') throw new GuardError('package.json needs a name and a version');
+  const integrity = `sha512-${createHash('sha512').update(raw).digest('base64')}`;
+  const registry = String(registryFlag ?? config.publishConfig.registry ?? DEFAULT_REGISTRY).replace(/\/+$/, '');
+  const url = `${registry}/${name.replace('/', '%2f')}`;
+  const base = { version: VERSION, file: resolve(file), package: `${name}@${version}`, registry, integrity };
+  let res;
+  try {
+    res = await fetch(url, { headers: { accept: 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8' }, signal: AbortSignal.timeout(30000) });
+  } catch (e) {
+    throw new GuardError(`cannot reach ${registry}: ${e.cause?.code ?? e.message}`);
+  }
+  if (res.status === 404) return { ...base, published: null, match: false, reason: `${name} is not on ${registry}` };
+  if (!res.ok) throw new GuardError(`${registry} answered HTTP ${res.status} for ${name}`);
+  let doc;
+  try {
+    doc = await res.json();
+  } catch {
+    throw new GuardError(`${registry} returned a packument that is not JSON`);
+  }
+  const published = doc?.versions?.[version]?.dist?.integrity ?? null;
+  if (!published) return { ...base, published: null, match: false, reason: `${name}@${version} is not published on ${registry}` };
+  const match = published === integrity;
+  return { ...base, published, match, reason: match ? 'the registry holds exactly this file' : 'the registry holds a different file for this version' };
+}
+
+function formatVerify(r) {
+  return [
+    `shipsafe ${r.version}  ${r.package}  ${r.file}`,
+    `local     ${r.integrity}`,
+    `registry  ${r.published ?? '(none)'}  ${r.registry}`,
+    `${r.match ? 'MATCH' : 'FAIL '} ${r.reason}`,
+  ].join('\n');
 }
 
 function formatReport(r) {
@@ -663,16 +708,41 @@ const USAGE = `shipsafe ${VERSION}
 
 Usage:
   shipsafe check <file.tgz>... [--json] scan packed npm tarballs; exit 1 on any finding, 2 on any error
+  shipsafe verify <file.tgz> [--registry <url>] [--json]
+                                       exit 0 only if the registry's dist.integrity for name@version equals this file
   shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin)
   shipsafe --version
 
 Rules: ${Object.keys(RULES).join(', ')}
 Config: "shipsafe": { "maxFileBytes": <n>, "allow": [{ "rule", "path", "reason" }] } in the packed package.json`;
 
+async function runVerify(rest) {
+  const json = rest.includes('--json');
+  const args = rest.filter((a) => a !== '--json');
+  let registry;
+  const files = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--registry') registry = args[++i];
+    else if (args[i].startsWith('--registry=')) registry = args[i].slice(11);
+    else files.push(args[i]);
+  }
+  if (files.length !== 1 || files[0].startsWith('-') || (registry !== undefined && !/^https?:\/\//.test(registry))) { console.error(USAGE); return 2; }
+  try {
+    const r = await verifyTarball(files[0], registry);
+    console.log(json ? JSON.stringify(r, null, 2) : formatVerify(r));
+    return r.match ? 0 : 1;
+  } catch (e) {
+    if (!(e instanceof GuardError) && e.code !== 'ENOENT' && e.code !== 'EISDIR') throw e;
+    console.error(`shipsafe: ${e.message}`);
+    return 2;
+  }
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === '--version' || cmd === '-v') { console.log(VERSION); return 0; }
   if (cmd === 'hook') return runHook();
+  if (cmd === 'verify') return runVerify(rest);
   if (cmd === 'check') {
     const json = rest.includes('--json');
     const files = rest.filter((a) => a !== '--json');
@@ -706,5 +776,5 @@ function main(argv) {
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
-  process.exitCode = main(process.argv.slice(2));
+  Promise.resolve(main(process.argv.slice(2))).then((code) => { process.exitCode = code; });
 }

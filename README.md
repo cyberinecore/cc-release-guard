@@ -8,7 +8,7 @@ What it does not do: make JavaScript unreversable. Minified JS, and the JS embed
 
 - **`shipsafe check <file.tgz>...`**: a zero-dependency Node CLI (Node 18+). It reads each real packed tarball and exits 1 on any finding, 2 on a usage or config error, 0 when every tarball is clean, printing each tarball's sha256. With `--json` it prints one report object for a single file and an array for several.
 - **PreToolUse hook**: fires only for Bash commands that look like `npm`, `pnpm`, `bun` or `yarn` publishes. It denies a publish that does not name a `.tgz`, re-runs the gate on the named tarball and denies it on any finding, and always denies `yarn npm publish`, which cannot publish a prebuilt tarball. It also denies a publish whose flags contradict the packed metadata: a scoped package with neither `--access` nor `publishConfig.access`, a `--registry` that differs from `publishConfig.registry`, and a prerelease version headed for the `latest` dist-tag (publish it with `--tag next`). Dry runs pass. It never approves anything, so the normal permission flow still applies to a clean publish.
-- **Skills** (slash commands): `/shipsafe:release` runs the whole release, auto-triggered when you ask Claude to publish; `/shipsafe:init` sets a repo up (files allowlist, maps off, prepack build, CI gate); `/shipsafe:check` gates a package without publishing; `/shipsafe:help` routes to the right one. The release skill carries the build, pack, gate and hand-over procedure for libraries (bundle, minify, no maps, bundled `.d.ts`, `files` allowlist) and executables (`bun build --compile --minify` per platform, shipped as per-platform packages behind a launcher). The OTP step stays with the human.
+- **Skills** (slash commands): `/shipsafe:release` runs the whole release, auto-triggered when you ask Claude to publish; `/shipsafe:init` sets a repo up (files allowlist, maps off, prepack build, CI gate); `/shipsafe:check` gates a package without publishing; `/shipsafe:verify` proves the registry holds exactly the checked tarball; `/shipsafe:help` routes to the right one. The release skill carries the build, pack, gate and hand-over procedure for libraries (bundle, minify, no maps, bundled `.d.ts`, `files` allowlist) and executables (`bun build --compile --minify` per platform, shipped as per-platform packages behind a launcher). The OTP step stays with the human.
 
 ## Rules
 
@@ -65,7 +65,10 @@ The hook needs `node` on `PATH`. If `node` is missing, the hook errors without b
 npm pack --pack-destination out
 npx --yes @cyberinecore/shipsafe@0.1.0 check out/*.tgz
 for f in out/*.tgz; do npm publish "$f" --access public; done
+for f in out/*.tgz; do npx --yes @cyberinecore/shipsafe@0.1.0 verify "$f"; done
 ```
+
+`shipsafe verify <file.tgz> [--registry <url>]` reads name@version from the tarball, fetches the registry's `dist.integrity` (from `publishConfig.registry`, else the npm registry) and exits 0 only when it equals the local file's sha512; 1 when the version is missing or holds a different file; 2 when the registry is unreachable. A publish from CI never passes through the hook, so this is how CI proves the file it checked is the file it published.
 
 For a workspace, pack every package into `out/` (`npm pack --workspaces --pack-destination out`); `check` gates them all in one run and fails if any one fails.
 

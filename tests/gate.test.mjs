@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
@@ -320,4 +322,53 @@ test('unknown config keys and nested archives are warnings, not failures', () =>
   assert.match(text, /unknown config key shipsafe\.maxFilesBytes/);
   assert.match(text, /unknown key shipsafe\.allow\[0\]\.note/);
   assert.match(text, /nested archive assets\/bundle\.zip was not scanned/);
+});
+
+function runAsync(args) {
+  return new Promise((done) => {
+    execFile('node', [CLI, ...args], { encoding: 'utf8' }, (err, stdout, stderr) => done({ code: err ? err.code : 0, stdout, stderr }));
+  });
+}
+
+async function withRegistry(packuments, fn) {
+  const server = createServer((req, res) => {
+    const doc = packuments[decodeURIComponent(req.url.slice(1))];
+    if (doc === 500) { res.writeHead(500); res.end(); return; }
+    res.writeHead(doc ? 200 : 404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(doc ?? { error: 'not found' }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    return await fn(`http://127.0.0.1:${server.address().port}`);
+  } finally {
+    server.close();
+  }
+}
+
+test('verify matches the registry dist.integrity against the local tarball', async () => {
+  const integrity = `sha512-${createHash('sha512').update(readFileSync(good)).digest('base64')}`;
+  const scoped = pack('verify-scoped', { 'index.js': 'x\n' }, { name: '@probe/verify-scoped' });
+  const scopedIntegrity = `sha512-${createHash('sha512').update(readFileSync(scoped)).digest('base64')}`;
+  await withRegistry({
+    good: { name: 'good', versions: { '1.0.0': { dist: { integrity } } } },
+    '@probe/verify-scoped': { versions: { '1.0.0': { dist: { integrity: scopedIntegrity } } } },
+    leaky: { versions: { '1.0.0': { dist: { integrity } } } },
+    'verify-old': { versions: { '0.9.0': { dist: { integrity } } } },
+    'verify-down': 500,
+  }, async (registry) => {
+    const ok = await runAsync(['verify', good, '--registry', registry, '--json']);
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.equal(JSON.parse(ok.stdout).match, true);
+    assert.equal((await runAsync(['verify', scoped, `--registry=${registry}`])).code, 0);
+    const other = await runAsync(['verify', leaky, '--registry', registry]);
+    assert.equal(other.code, 1);
+    assert.match(other.stdout, /different file/);
+    assert.equal((await runAsync(['verify', pack('verify-missing', { 'index.js': 'x\n' }), '--registry', registry])).code, 1);
+    assert.match((await runAsync(['verify', pack('verify-old', { 'index.js': 'x\n' }), '--registry', registry])).stdout, /not published/);
+    assert.equal((await runAsync(['verify', pack('verify-down', { 'index.js': 'x\n' }), '--registry', registry])).code, 2);
+  });
+  const viaConfig = pack('verify-config', { 'index.js': 'x\n' }, { publishConfig: { registry: 'http://127.0.0.1:9/' } });
+  const down = await runAsync(['verify', viaConfig]);
+  assert.equal(down.code, 2);
+  assert.match(down.stderr, /cannot reach http:\/\/127\.0\.0\.1:9/);
 });

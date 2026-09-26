@@ -611,3 +611,18 @@ test('Electron asar archives are scanned, directly and inside a zip', (t) => {
   writeFileSync(cut, whole.subarray(0, whole.length - 10));
   assert.equal(check(cut).code, 2);
 });
+
+test('eas update must publish a checked prebuilt export', () => {
+  const app = join(root, 'expo-app');
+  mkdirSync(join(app, 'dist/_expo/static/js/ios'), { recursive: true });
+  mkdirSync(join(app, 'export-clean'), { recursive: true });
+  writeFileSync(join(app, 'dist/_expo/static/js/ios/index.hbc'), 'x');
+  writeFileSync(join(app, 'dist/_expo/static/js/ios/index.hbc.map'), '{}');
+  writeFileSync(join(app, 'export-clean/metadata.json'), '{}');
+  assert.match(hook('eas update --channel production --message "x"', app).permissionDecisionReason, /expo export/);
+  assert.match(hook('npx eas-cli@latest update --auto', app).permissionDecisionReason, /expo export/);
+  assert.match(hook('eas update --skip-bundler --channel production', app).permissionDecisionReason, /source-map/);
+  assert.equal(hook('eas update --skip-bundler --input-dir export-clean --branch main', app), null);
+  assert.equal(hook('eas update:list', app), null);
+  assert.equal(hook('eas build --platform ios', app), null);
+});

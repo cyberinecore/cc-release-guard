@@ -963,6 +963,7 @@ const DEPLOY_VALUE_OPTS = {
   wrangler: new Set(['--project-name', '--branch', '--commit-hash', '--commit-message', '--env', '-e', '--config', '-c', '--cwd']),
   vercel: new Set(['--cwd', '--scope', '-S', '--token', '-t', '--env', '-e', '--build-env', '-b', '--meta', '-m', '--target', '--archive', '--local-config', '-A', '--team', '-T']),
   netlify: new Set(['--dir', '-d', '--site', '-s', '--auth', '-a', '--message', '-m', '--alias', '--functions', '-f', '--filter', '--context', '--branch', '-b']),
+  eas: new Set(['--input-dir', '--channel', '--branch', '--message', '-m', '-p', '--platform', '--environment', '--runtime-version', '--group']),
   firebase: new Set(['--only', '--except', '--project', '-P', '--config', '-c', '--message', '-m', '--token']),
 };
 
@@ -1020,6 +1021,13 @@ function findDeploy(prog, args, cwd) {
     if (dir) return { manager: 'netlify deploy', dirs: [at(cwd, dir)] };
     const fromConfig = tomlString(join(cwd, 'netlify.toml'), 'publish');
     return fromConfig ? { manager: 'netlify deploy', dirs: [at(cwd, fromConfig)] } : { manager: 'netlify deploy', error: '`netlify deploy` names no directory and netlify.toml has no publish setting. Name it: `netlify deploy --dir dist`.' };
+  }
+  if (prog === 'eas') {
+    if (pos[0] !== 'update') return null;
+    if (!args.includes('--skip-bundler')) {
+      return { manager: 'eas update', error: '`eas update` bundles the app during the upload, so shipsafe never sees what ships. Export first (`npx expo export --output-dir dist`), run `shipsafe check-dir dist`, then publish that export with `eas update --skip-bundler --input-dir dist`.' };
+    }
+    return { manager: 'eas update --skip-bundler', dirs: [at(cwd, optionValue(args, '--input-dir') ?? 'dist')] };
   }
   if (prog === 'firebase') {
     if (pos[0] !== 'deploy') return null;
@@ -1095,7 +1103,7 @@ function scanSegment(seg, cwd, ctx) {
   if (ctx.depth > MAX_NESTING) throw new GuardError('the command nests shells or runners too deeply');
   const t = unwrap(seg);
   if (!t.length) return cwd;
-  const prog = basename(t[0]).replace(/^(.+?)@.*$/, '$1');
+  const prog = basename(t[0]).replace(/^(.+?)@.*$/, '$1').replace(/^eas-cli$/, 'eas');
   const nested = (tokens, computed = ctx.computed) => scanSegment(tokens, cwd, { ...ctx, depth: ctx.depth + 1, computed });
   if (prog === 'cd') {
     const target = t[1];

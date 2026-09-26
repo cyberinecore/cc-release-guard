@@ -9,7 +9,8 @@ import { gunzipSync } from 'node:zlib';
 const VERSION = '0.1.0';
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
-const CONFIG_KEYS = ['maxFileBytes', 'allow'];
+const CONFIG_KEYS = ['maxFileBytes', 'growthFactor', 'allow'];
+const DEFAULT_GROWTH_FACTOR = 2;
 const NESTED_ARCHIVE = /\.(zip|tgz|tar|tar\.gz|gz|jar|war|vsix|whl|7z|rar|xz|bz2|zst)$/i;
 const MAX_UNPACKED_BYTES = 1024 * 1024 * 1024;
 const MANAGERS = new Set(['npm', 'pnpm', 'bun', 'yarn']);
@@ -183,6 +184,8 @@ function loadConfig(files) {
   for (const k of Object.keys(raw)) if (!CONFIG_KEYS.includes(k)) configWarnings.push(`unknown config key shipsafe.${k} is ignored (known: ${CONFIG_KEYS.join(', ')})`);
   const maxFileBytes = raw.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
   if (!Number.isFinite(maxFileBytes) || maxFileBytes <= 0) throw new GuardError('shipsafe.maxFileBytes must be a positive number');
+  const growthFactor = raw.growthFactor ?? DEFAULT_GROWTH_FACTOR;
+  if (!Number.isFinite(growthFactor) || growthFactor <= 1) throw new GuardError('shipsafe.growthFactor must be a number above 1');
   const allow = (raw.allow ?? []).map((a, i) => {
     if (!a || !RULES[a.rule]) throw new GuardError(`shipsafe.allow[${i}].rule must be one of: ${Object.keys(RULES).join(', ')}`);
     if (typeof a.path !== 'string' || !a.path) throw new GuardError(`shipsafe.allow[${i}].path is required`);
@@ -192,7 +195,7 @@ function loadConfig(files) {
   });
   const scripts = json.scripts && typeof json.scripts === 'object' ? json.scripts : {};
   const publishConfig = json.publishConfig && typeof json.publishConfig === 'object' ? json.publishConfig : {};
-  return { name: json.name, version: json.version, private: json.private === true, publishConfig, maxFileBytes, allow, scripts, pkg: json, warnings: configWarnings };
+  return { name: json.name, version: json.version, private: json.private === true, publishConfig, maxFileBytes, growthFactor, allow, scripts, pkg: json, warnings: configWarnings };
 }
 
 function isPrerelease(version) {
@@ -286,7 +289,7 @@ function scanContent(data) {
 }
 
 function openTarball(file) {
-  const raw = readFileSync(file);
+  const raw = Buffer.isBuffer(file) ? file : readFileSync(file);
   let tar;
   try {
     tar = raw[0] === 0x1f && raw[1] === 0x8b ? gunzipSync(raw, { maxOutputLength: MAX_UNPACKED_BYTES }) : raw;
@@ -369,6 +372,23 @@ export function checkTarball(file) {
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
 
+async function fetchPackument(registry, name) {
+  const url = `${registry}/${name.replace('/', '%2f')}`;
+  let res;
+  try {
+    res = await fetch(url, { headers: { accept: 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8' }, signal: AbortSignal.timeout(30000) });
+  } catch (e) {
+    throw new GuardError(`cannot reach ${registry}: ${e.cause?.code ?? e.message}`);
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new GuardError(`${registry} answered HTTP ${res.status} for ${name}`);
+  try {
+    return await res.json();
+  } catch {
+    throw new GuardError(`${registry} returned a packument that is not JSON`);
+  }
+}
+
 export async function verifyTarball(file, registryFlag) {
   const { raw, files } = openTarball(file);
   const config = loadConfig(files);
@@ -376,26 +396,97 @@ export async function verifyTarball(file, registryFlag) {
   if (typeof name !== 'string' || typeof version !== 'string') throw new GuardError('package.json needs a name and a version');
   const integrity = `sha512-${createHash('sha512').update(raw).digest('base64')}`;
   const registry = String(registryFlag ?? config.publishConfig.registry ?? DEFAULT_REGISTRY).replace(/\/+$/, '');
-  const url = `${registry}/${name.replace('/', '%2f')}`;
   const base = { version: VERSION, file: resolve(file), package: `${name}@${version}`, registry, integrity };
-  let res;
-  try {
-    res = await fetch(url, { headers: { accept: 'application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8' }, signal: AbortSignal.timeout(30000) });
-  } catch (e) {
-    throw new GuardError(`cannot reach ${registry}: ${e.cause?.code ?? e.message}`);
-  }
-  if (res.status === 404) return { ...base, published: null, match: false, reason: `${name} is not on ${registry}` };
-  if (!res.ok) throw new GuardError(`${registry} answered HTTP ${res.status} for ${name}`);
-  let doc;
-  try {
-    doc = await res.json();
-  } catch {
-    throw new GuardError(`${registry} returned a packument that is not JSON`);
-  }
+  const doc = await fetchPackument(registry, name);
+  if (!doc) return { ...base, published: null, match: false, reason: `${name} is not on ${registry}` };
   const published = doc?.versions?.[version]?.dist?.integrity ?? null;
   if (!published) return { ...base, published: null, match: false, reason: `${name}@${version} is not published on ${registry}` };
   const match = published === integrity;
   return { ...base, published, match, reason: match ? 'the registry holds exactly this file' : 'the registry holds a different file for this version' };
+}
+
+function splitSpec(spec, fallbackName) {
+  const at = spec.lastIndexOf('@');
+  if (at > 0) return [spec.slice(0, at), spec.slice(at + 1)];
+  if (at === 0) return [spec, 'latest'];
+  return [fallbackName, spec];
+}
+
+function packageFacts(opened) {
+  const config = loadConfig(opened.files);
+  const pkg = config.pkg;
+  const bin = typeof pkg.bin === 'string' ? { [String(pkg.name).split('/').pop()]: pkg.bin } : pkg.bin && typeof pkg.bin === 'object' ? pkg.bin : {};
+  const deps = {};
+  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+    for (const [k, v] of Object.entries(pkg[field] ?? {})) deps[k] = `${v}${field === 'dependencies' ? '' : ` (${field})`}`;
+  }
+  const exp = pkg.exports;
+  const exportKeys = exp === undefined ? [] : typeof exp === 'object' && exp !== null && !Array.isArray(exp) && Object.keys(exp).some((k) => k.startsWith('.')) ? Object.keys(exp) : ['.'];
+  const scripts = Object.fromEntries(INSTALL_SCRIPTS.filter((n) => typeof config.scripts[n] === 'string').map((n) => [n, config.scripts[n]]));
+  const allow = config.allow.map((a) => `${a.rule} ${a.path}`);
+  const files = new Map(opened.files.map((f) => [f.path, f.size]));
+  return { config, package: `${config.name}@${config.version}`, bin, deps, exportKeys, scripts, allow, files };
+}
+
+export function diffPackages(next, prev) {
+  const n = packageFacts(next);
+  const out = { version: VERSION, new: n.package, old: null, added: [], removed: [], grown: [], risks: [] };
+  if (!prev) return out;
+  const o = packageFacts(prev);
+  out.old = o.package;
+  const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  for (const [path, size] of n.files) {
+    if (!o.files.has(path)) out.added.push({ path, size });
+    else if (size > o.files.get(path)) {
+      const from = o.files.get(path);
+      const ratio = from ? size / from : Infinity;
+      out.grown.push({ path, from, to: size });
+      if (ratio >= n.config.growthFactor && size - from > 1024) out.risks.push({ label: 'size-jump', detail: `${path} ${from} -> ${size} bytes (x${from ? ratio.toFixed(1) : 'inf'})` });
+    }
+  }
+  for (const [path, size] of o.files) if (!n.files.has(path)) out.removed.push({ path, size });
+  for (const [k, v] of Object.entries(n.scripts)) if (o.scripts[k] !== v) out.risks.push({ label: 'new-lifecycle-script', detail: `package.json#${k}: ${v.slice(0, 120)}` });
+  for (const [k, v] of Object.entries(n.deps)) if (!(k in o.deps)) out.risks.push({ label: 'new-dependency', detail: `${k}@${v}` });
+  for (const [k, v] of Object.entries(n.bin)) if (!(k in o.bin)) out.risks.push({ label: 'new-bin', detail: `${k} -> ${v}` });
+  for (const k of n.exportKeys) if (!o.exportKeys.includes(k)) out.risks.push({ label: 'new-export', detail: k });
+  for (const a of n.allow) if (!o.allow.includes(a)) out.risks.push({ label: 'new-exception', detail: a });
+  out.added.sort(byPath);
+  out.removed.sort(byPath);
+  out.grown.sort(byPath);
+  return out;
+}
+
+async function loadBaseline(nextOpened, against, oldFile, registryFlag) {
+  if (oldFile) return { opened: openTarball(oldFile), source: resolve(oldFile) };
+  const config = loadConfig(nextOpened.files);
+  const [name, spec] = splitSpec(against ?? 'latest', config.name);
+  const registry = String(registryFlag ?? config.publishConfig.registry ?? DEFAULT_REGISTRY).replace(/\/+$/, '');
+  const doc = await fetchPackument(registry, name);
+  const version = doc?.['dist-tags']?.[spec] ?? (doc?.versions?.[spec] ? spec : null);
+  const url = version ? doc.versions[version]?.dist?.tarball : null;
+  if (!url) return { opened: null, source: `${name}@${spec} on ${registry}` };
+  let res;
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(120000) });
+  } catch (e) {
+    throw new GuardError(`cannot download ${name}@${version}: ${e.cause?.code ?? e.message}`);
+  }
+  if (!res.ok) throw new GuardError(`downloading ${name}@${version} answered HTTP ${res.status}`);
+  return { opened: openTarball(Buffer.from(await res.arrayBuffer())), source: `${name}@${version} (${spec}) on ${registry}` };
+}
+
+function formatDiff(d, source) {
+  const lines = [`shipsafe ${d.version} diff  ${d.new} vs ${d.old ?? 'nothing'}  ${source}`];
+  if (!d.old) {
+    lines.push('no baseline: nothing published to compare against');
+    return lines.join('\n');
+  }
+  for (const r of d.risks) lines.push(`RISK  ${r.label.padEnd(20)} ${r.detail}`);
+  for (const f of d.added) lines.push(`ADD   ${f.path}  (${f.size} bytes)`);
+  for (const f of d.removed) lines.push(`DEL   ${f.path}`);
+  for (const f of d.grown) lines.push(`GROW  ${f.path}  ${f.from} -> ${f.to} bytes`);
+  lines.push(`${d.added.length} added, ${d.removed.length} removed, ${d.grown.length} grown, ${d.risks.length} risk label(s)`);
+  return lines.join('\n');
 }
 
 function formatVerify(r) {
@@ -710,6 +801,8 @@ Usage:
   shipsafe check <file.tgz>... [--json] scan packed npm tarballs; exit 1 on any finding, 2 on any error
   shipsafe verify <file.tgz> [--registry <url>] [--json]
                                        exit 0 only if the registry's dist.integrity for name@version equals this file
+  shipsafe diff <new.tgz> [<old.tgz> | --against <name@version|dist-tag>] [--registry <url>] [--json]
+                                       list added, removed and grown files and label risk-raising changes (default: against latest)
   shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin)
   shipsafe --version
 
@@ -738,11 +831,43 @@ async function runVerify(rest) {
   }
 }
 
+async function runDiff(rest) {
+  const json = rest.includes('--json');
+  const args = rest.filter((a) => a !== '--json');
+  let registry;
+  let against;
+  const files = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--registry') registry = args[++i];
+    else if (a.startsWith('--registry=')) registry = a.slice(11);
+    else if (a === '--against') against = args[++i];
+    else if (a.startsWith('--against=')) against = a.slice(10);
+    else files.push(a);
+  }
+  const bad = !files.length || files.length > 2 || files.some((f) => !f || f.startsWith('-')) || (files.length === 2 && against !== undefined)
+    || (registry !== undefined && !/^https?:\/\//.test(registry)) || against === '';
+  if (bad) { console.error(USAGE); return 2; }
+  try {
+    const next = openTarball(files[0]);
+    const base = await loadBaseline(next, against, files[1], registry);
+    const d = diffPackages(next, base.opened);
+    d.source = base.source;
+    console.log(json ? JSON.stringify(d, null, 2) : formatDiff(d, base.source));
+    return 0;
+  } catch (e) {
+    if (!(e instanceof GuardError) && e.code !== 'ENOENT' && e.code !== 'EISDIR') throw e;
+    console.error(`shipsafe: ${e.message}`);
+    return 2;
+  }
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === '--version' || cmd === '-v') { console.log(VERSION); return 0; }
   if (cmd === 'hook') return runHook();
   if (cmd === 'verify') return runVerify(rest);
+  if (cmd === 'diff') return runDiff(rest);
   if (cmd === 'check') {
     const json = rest.includes('--json');
     const files = rest.filter((a) => a !== '--json');

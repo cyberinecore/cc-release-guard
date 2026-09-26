@@ -55,6 +55,8 @@ Make sure `.local/` is gitignored. The gate fails on any `*.map`, embedded `sour
 "shipsafe": { "allow": [{ "rule": "bucket-url", "path": "dist/*.js", "reason": "documented public download bucket" }] }
 ```
 
+Review the delta before handing over: `node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" diff .local/release/<name>-<version>.tgz` compares against the published `latest` and prints `RISK` lines for new install scripts, dependencies, bins, exports, exceptions and size jumps. Walk the user through every `RISK` line; the first release prints `no baseline`.
+
 Then confirm the version is still free (npm never lets a version be republished): `npm view <name>@<version> version` must return E404.
 
 ## 4. Hand over the publish

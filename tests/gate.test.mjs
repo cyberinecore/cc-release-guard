@@ -334,6 +334,7 @@ async function withRegistry(packuments, fn) {
   const server = createServer((req, res) => {
     const doc = packuments[decodeURIComponent(req.url.slice(1))];
     if (doc === 500) { res.writeHead(500); res.end(); return; }
+    if (Buffer.isBuffer(doc)) { res.writeHead(200, { 'content-type': 'application/octet-stream' }); res.end(doc); return; }
     res.writeHead(doc ? 200 : 404, { 'content-type': 'application/json' });
     res.end(JSON.stringify(doc ?? { error: 'not found' }));
   });
@@ -371,4 +372,40 @@ test('verify matches the registry dist.integrity against the local tarball', asy
   const down = await runAsync(['verify', viaConfig]);
   assert.equal(down.code, 2);
   assert.match(down.stderr, /cannot reach http:\/\/127\.0\.0\.1:9/);
+});
+
+test('diff lists file changes and labels risk-raising changes', async () => {
+  const oldTgz = pack('diff-old', { 'dist/a.js': 'a\n', 'dist/b.js': 'b\n', 'dist/big.js': 'x'.repeat(2000) }, {
+    name: 'diffpkg', exports: { '.': './dist/a.js' }, dependencies: { 'left-pad': '^1.0.0' }, bin: { one: './dist/a.js' },
+  });
+  const newTgz = pack('diff-new', { 'dist/a.js': 'a\n', 'dist/c.js': 'c\n', 'dist/big.js': 'x'.repeat(9000) }, {
+    name: 'diffpkg', version: '1.1.0', exports: { '.': './dist/a.js', './c': './dist/c.js' },
+    dependencies: { 'left-pad': '^1.0.0', 'is-odd': '^3.0.0' }, bin: { one: './dist/a.js', two: './dist/c.js' },
+    scripts: { postinstall: 'node dist/c.js' },
+    shipsafe: { allow: [{ rule: 'lifecycle-script', path: 'package.json#postinstall', reason: 'needed for the diff test' }] },
+  });
+  const local = await runAsync(['diff', newTgz, oldTgz, '--json']);
+  assert.equal(local.code, 0, local.stderr);
+  const d = JSON.parse(local.stdout);
+  assert.equal(d.new, 'diffpkg@1.1.0');
+  assert.equal(d.old, 'diffpkg@1.0.0');
+  assert.deepEqual(d.added.map((f) => f.path), ['dist/c.js']);
+  assert.deepEqual(d.removed.map((f) => f.path), ['dist/b.js']);
+  assert.deepEqual(d.grown.map((f) => f.path), ['dist/big.js', 'package.json']);
+  assert.deepEqual(d.risks.map((r) => r.label).sort(), ['new-bin', 'new-dependency', 'new-exception', 'new-export', 'new-lifecycle-script', 'size-jump']);
+  const text = await runAsync(['diff', newTgz, oldTgz]);
+  assert.match(text.stdout, /RISK  new-lifecycle-script +package\.json#postinstall/);
+  assert.match(text.stdout, /ADD   dist\/c\.js/);
+  const doc = { 'dist-tags': { latest: '1.0.0' }, versions: { '1.0.0': { dist: {} } } };
+  await withRegistry({ diffpkg: doc, '-/diffpkg-1.0.0.tgz': readFileSync(oldTgz) }, async (registry) => {
+    doc.versions['1.0.0'].dist.tarball = `${registry}/-/diffpkg-1.0.0.tgz`;
+    const viaTag = await runAsync(['diff', newTgz, '--registry', registry, '--json']);
+    assert.equal(viaTag.code, 0, viaTag.stderr);
+    assert.equal(JSON.parse(viaTag.stdout).old, 'diffpkg@1.0.0');
+    const viaVersion = await runAsync(['diff', newTgz, '--against', 'diffpkg@1.0.0', '--registry', registry, '--json']);
+    assert.equal(JSON.parse(viaVersion.stdout).risks.length, 6);
+    const none = await runAsync(['diff', newTgz, '--against', 'next', '--registry', registry]);
+    assert.equal(none.code, 0);
+    assert.match(none.stdout, /no baseline/);
+  });
 });

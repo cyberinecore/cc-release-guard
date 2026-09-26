@@ -11,7 +11,7 @@ const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
 const CONFIG_KEYS = ['maxFileBytes', 'growthFactor', 'allow'];
 const DEFAULT_GROWTH_FACTOR = 2;
-const NESTED_ARCHIVE = /\.(zip|tgz|tar|tar\.gz|gz|jar|war|vsix|whl|7z|rar|xz|bz2|zst)$/i;
+const NESTED_ARCHIVE = /\.(asar|zip|tgz|tar|tar\.gz|gz|jar|war|vsix|whl|7z|rar|xz|bz2|zst)$/i;
 const MAX_UNPACKED_BYTES = 1024 * 1024 * 1024;
 const MANAGERS = new Set(['npm', 'pnpm', 'bun', 'yarn']);
 const WRAPPERS = new Set(['time', 'nice', 'nohup', 'command', 'builtin', 'noglob', 'exec', 'sudo']);
@@ -409,19 +409,77 @@ function readZip(buf) {
   return entries;
 }
 
+function isAsar(buf) {
+  return buf.length >= 16 && buf.readUInt32LE(0) === 4 && buf.subarray(16, 26).toString('latin1') === '{"files":{';
+}
+
+function readAsar(buf, label = 'app.asar') {
+  const headerSize = buf.readUInt32LE(4);
+  const jsonLen = buf.readUInt32LE(12);
+  if (16 + jsonLen > buf.length || 8 + headerSize > buf.length) throw new GuardError(`${label} is truncated (header out of range)`);
+  let index;
+  try {
+    index = JSON.parse(buf.subarray(16, 16 + jsonLen).toString('utf8'));
+  } catch (e) {
+    throw new GuardError(`${label} has an unreadable index: ${e.message}`);
+  }
+  const base = 8 + headerSize;
+  const entries = [];
+  const unpacked = [];
+  let total = 0;
+  const walk = (node, prefix, depth) => {
+    if (depth > 64) throw new GuardError(`${label} nests directories too deeply`);
+    for (const [name, meta] of Object.entries(node.files ?? {})) {
+      const path = prefix ? `${prefix}/${name}` : name;
+      checkEntryPath(path);
+      if (name.includes('/') || name.includes('\\')) throw new GuardError(`${label} has an entry name with a path separator: ${path}`);
+      if (meta.files) { entries.push({ path, rel: path, type: '5', size: 0, data: Buffer.alloc(0), linkname: '' }); walk(meta, path, depth + 1); continue; }
+      if (typeof meta.link === 'string') { entries.push({ path, rel: path, type: '2', size: 0, data: Buffer.alloc(0), linkname: meta.link }); continue; }
+      if (meta.unpacked) { unpacked.push(path); continue; }
+      const size = Number(meta.size);
+      const offset = Number(meta.offset);
+      if (!Number.isSafeInteger(size) || !Number.isSafeInteger(offset) || size < 0 || offset < 0) throw new GuardError(`${label} has a malformed entry: ${path}`);
+      if (base + offset + size > buf.length) throw new GuardError(`${label} is truncated (${path})`);
+      total += size;
+      if (total > MAX_UNPACKED_BYTES) throw new GuardError(`${label} holds more than ${MAX_UNPACKED_BYTES} bytes; refusing to scan it`);
+      entries.push({ path, rel: path, type: '0', size, data: buf.subarray(base + offset, base + offset + size), linkname: '' });
+    }
+  };
+  walk(index, '', 0);
+  return { entries, unpacked };
+}
+
+function expandNestedAsar(entries, warnings) {
+  const out = [];
+  for (const e of entries) {
+    out.push(e);
+    if (e.type !== '0' || !/\.asar$/i.test(e.rel) || !isAsar(e.data)) continue;
+    const inner = readAsar(e.data, e.rel);
+    for (const x of inner.entries) out.push({ ...x, path: `${e.rel}/${x.path}`, rel: `${e.rel}/${x.rel}` });
+    for (const u of inner.unpacked) warnings.push(`${e.rel}: ${u} is unpacked (app.asar.unpacked) and scanned only if it ships beside the archive`);
+  }
+  return out;
+}
+
 function openTarball(file) {
   const raw = Buffer.isBuffer(file) ? file : readFileSync(file);
+  if (isAsar(raw)) {
+    const { entries, unpacked } = readAsar(raw, Buffer.isBuffer(file) ? 'app.asar' : basename(file));
+    const files = entries.filter((e) => e.type === '0').map((e) => ({ path: e.rel, size: e.size, data: e.data }));
+    return { raw, entries, files, kind: 'asar', format: 'asar', notes: unpacked.map((u) => `${u} is unpacked (app.asar.unpacked) and not inside this archive; check that directory with check-dir`) };
+  }
   if (raw.length >= 4 && raw.readUInt32LE(0) === 0x04034b50 || raw.length >= 22 && raw.readUInt32LE(raw.length - 22) === 0x06054b50) {
     const all = readZip(raw);
     if (!all.length) throw new GuardError('the zip archive is empty');
     const names = new Set(all.map((e) => e.path));
     const vsix = names.has('extension/package.json') && (names.has('extension.vsixmanifest') || names.has('[Content_Types].xml'));
-    const entries = vsix
+    const notes = [];
+    const entries = expandNestedAsar(vsix
       ? all.filter((e) => e.path.startsWith('extension/')).map((e) => ({ ...e, rel: e.path.slice(10) })).filter((e) => e.rel)
-      : all.map((e) => ({ ...e, rel: e.path.replace(/\/$/, '') }));
+      : all.map((e) => ({ ...e, rel: e.path.replace(/\/$/, '') })), notes);
     const files = entries.filter((e) => e.type === '0').map((e) => ({ path: e.rel, size: e.size, data: e.data }));
     const kind = vsix ? 'vsix' : names.has('manifest.json') ? 'webext' : 'generic';
-    return { raw, entries, files, kind, format: 'zip' };
+    return { raw, entries, files, kind, format: 'zip', notes };
   }
   let tar;
   try {
@@ -441,6 +499,7 @@ function openTarball(file) {
 const KIND_RULES = {
   vsix: new Set(Object.keys(RULES).filter((r) => r !== 'lifecycle-script' && r !== 'publish-intent')),
   webext: new Set([...DIR_RULES, 'typescript-source', 'source-dir', 'test-path', 'file-size']),
+  asar: new Set([...DIR_RULES, 'typescript-source', 'test-path']),
   generic: DIR_RULES,
 };
 const BROAD_HOSTS = new Set(['<all_urls>', '*://*/*', 'http://*/*', 'https://*/*', '*://*/', 'http://*/', 'https://*/']);
@@ -459,14 +518,14 @@ function webextWarnings(files) {
 }
 
 export function checkTarball(file, label, { asset = false } = {}) {
-  const { raw, entries, files, kind, format } = openTarball(file);
+  const { raw, entries, files, kind, format, notes = [] } = openTarball(file);
   const sha256 = createHash('sha256').update(raw).digest('hex');
   if (kind === 'generic' && format === 'tar' && !asset) loadConfig(files);
   const allowed = KIND_RULES[kind];
   const config = kind === 'npm' || kind === 'vsix' ? loadConfig(files) : parseConfig({});
   const [webext, extWarnings] = kind === 'webext' ? webextWarnings(files) : [null, []];
   const findings = [];
-  const warnings = [...config.warnings, ...extWarnings];
+  const warnings = [...config.warnings, ...extWarnings, ...notes];
   const integrity = new Map();
   const note = (path, detail) => { if (!integrity.has(path)) integrity.set(path, detail); };
   for (const e of entries) {
@@ -507,7 +566,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
   for (const f of files) {
     unpackedBytes += f.size;
     const hits = [...scanPath(f.path), ...scanContent(f.data)];
-    if (NESTED_ARCHIVE.test(f.path)) warnings.push(`nested archive ${f.path} was not scanned inside`);
+    if (NESTED_ARCHIVE.test(f.path) && !(/\.asar$/i.test(f.path) && isAsar(f.data))) warnings.push(`nested archive ${f.path} was not scanned inside`);
     if (isMetafile(f.path, f.data)) hits.push(['build-artifact', 'esbuild metafile']);
     if (f.size > config.maxFileBytes) hits.push(['file-size', `${f.size} bytes > ${config.maxFileBytes}`]);
     record(f.path, hits);
@@ -517,7 +576,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
     version: VERSION,
     file: label ?? resolve(file),
     kind,
-    package: kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
+    package: kind === 'asar' ? 'Electron asar archive' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
     manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
     files: files.length,
@@ -975,7 +1034,7 @@ function findDeploy(prog, args, cwd) {
   return null;
 }
 const GH_VALUE_OPTS = new Set(['-t', '--title', '-n', '--notes', '-F', '--notes-file', '--target', '--discussion-category', '-R', '--repo', '--notes-start-tag', '--notes-from-tag']);
-const SCANNABLE_ASSET = /\.(tgz|tar\.gz|zip|vsix)$/i;
+const SCANNABLE_ASSET = /\.(tgz|tar\.gz|zip|vsix|asar)$/i;
 
 function findReleaseAssets(args, cwd) {
   const pos = deployPositionals(args, GH_VALUE_OPTS);
@@ -1226,7 +1285,7 @@ const USAGE = `shipsafe ${VERSION}
 
 Usage:
   shipsafe check <file.tgz>... [--json | --format text|json|sarif|markdown]
-                                       scan npm tarballs, .vsix and browser-extension .zip; exit 1 on any finding, 2 on any error
+                                       scan npm tarballs, .vsix, .asar and extension .zip; exit 1 on any finding, 2 on any error
   shipsafe check-dir <dir>... [--json | --format ...]
                                        scan a static build output (maps, sourcesContent, credentials, secrets, buckets)
   shipsafe verify <file.tgz> [--registry <url>] [--json]

@@ -575,3 +575,39 @@ test('zip reader: symlinks are findings, truncated or hostile zips exit 2', () =
   writeFileSync(cut, Buffer.concat([whole.subarray(0, 60), whole.subarray(whole.length - 200)]));
   assert.equal(check(cut).code, 2);
 });
+
+function asarPack(name, tree, extra = []) {
+  const dir = join(root, `${name}-app`);
+  for (const [path, content] of Object.entries(tree)) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), content);
+  }
+  const out = join(root, `${name}.asar`);
+  const r = spawnSync('npx', ['--yes', '@electron/asar', 'pack', dir, out, ...extra], { encoding: 'utf8' });
+  return r.status === 0 ? out : null;
+}
+
+test('Electron asar archives are scanned, directly and inside a zip', (t) => {
+  const bad = asarPack('bad-app', { 'package.json': '{"name":"app"}', 'dist/main.js': 'a()\n', 'dist/main.js.map': '{}', 'src/renderer.ts': 'x\n' });
+  if (!bad) { t.skip('@electron/asar is not available'); return; }
+  const r = check(bad);
+  assert.equal(r.code, 1);
+  assert.equal(r.report.kind, 'asar');
+  assert.deepEqual(rules(r.report), ['source-map', 'typescript-source']);
+  const clean = asarPack('clean-app', { 'package.json': '{"name":"app"}', 'dist/main.js': 'a()\n', 'lib/native.node': 'bin' }, ['--unpack', '*.node']);
+  const ok = check(clean);
+  assert.equal(ok.code, 0, JSON.stringify(ok.report?.findings));
+  assert.match(ok.report.warnings.join('\n'), /lib\/native\.node is unpacked/);
+  const zipDirPath = join(root, 'mac-zip-src/App.app/Contents/Resources');
+  mkdirSync(zipDirPath, { recursive: true });
+  writeFileSync(join(zipDirPath, 'app.asar'), readFileSync(bad));
+  const zipped = join(root, 'mac-app.zip');
+  execFileSync('zip', ['-qr', zipped, '.'], { cwd: join(root, 'mac-zip-src') });
+  const z = check(zipped);
+  assert.equal(z.code, 1);
+  assert.ok(z.report.findings.some((f) => f.path === 'App.app/Contents/Resources/app.asar/dist/main.js.map'));
+  const cut = join(root, 'hostile-cut.asar');
+  const whole = readFileSync(bad);
+  writeFileSync(cut, whole.subarray(0, whole.length - 10));
+  assert.equal(check(cut).code, 2);
+});

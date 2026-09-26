@@ -36,7 +36,7 @@ Key design decisions (do not reverse without the user):
 - Content rules are written so the gate's own source does not trip them (`sourcesContent` must be followed by `:`; inline maps need `data:<letter>`). Keep that property when adding rules, or the dogfood check fails.
 - The `if` filters in `hooks/hooks.json` (`Bash(*publish*)`, plus `semantic-release`, `release-it` and `np` shapes, which carry no `publish` word) only limit when the hook spawns; exact detection happens in `findPublishes()` (shell-ish tokenizer, `cd` tracking, wrapper/env stripping, value-taking option skipping, recursion into `sh|bash|zsh -c`, `eval`, package runners `npx`/`bunx`/`corepack`/`<pm> exec|dlx|x`, and `xargs`/`find -exec`, whose tarball is unknowable and so always denied). A leading `*` is required: `Bash(npm*publish*)` never spawns for `npx npm publish`. Claude Code's `if` matching is best-effort, and publishes hidden in `npm run <script>` are out of reach by design.
 
-Tarball parsing is hand-written (gzip via `node:zlib`, ustar + pax + GNU longname) to stay zero-dependency; entries are rooted by stripping the first path segment (`package/`).
+Archive parsing is hand-written to stay zero-dependency: tar (gzip via `node:zlib`, ustar + pax + GNU longname; entries rooted by stripping the first path segment, `package/`) and zip (central directory, stored + deflate via `inflateRawSync`; `.vsix` rooted at `extension/`). `openTarball()` returns a `kind` (`npm`, `vsix`, `webext`, `generic`) and `KIND_RULES` limits which rules apply to each. The zip reader is meant to be reused for PyPI wheels.
 
 ## Plugin constraints
 

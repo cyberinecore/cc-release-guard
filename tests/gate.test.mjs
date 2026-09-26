@@ -513,7 +513,65 @@ test('gh release create and upload gate attached tarballs', () => {
   assert.equal(hook(`gh release upload v1 ${good}`, rel), null);
   assert.match(hook(`gh release upload v1 ${leaky} --clobber`).permissionDecisionReason, /source-map/);
   assert.match(hook('gh release upload v1 *.tar.gz', rel).permissionDecisionReason, /source-map/);
-  assert.match(hook('gh release create v1 app.zip', rel).permissionDecisionReason, /cannot scan yet/);
+  assert.match(hook('gh release create v1 app.zip', rel).permissionDecisionReason, /could not check .*app\.zip/);
+  writeFileSync(join(rel, 'app.jar'), 'PK\n');
+  assert.match(hook('gh release create v1 app.jar', rel).permissionDecisionReason, /cannot scan yet/);
   assert.equal(hook('gh release create v1 --generate-notes', rel), null);
   assert.equal(hook('gh release view v1', rel), null);
+});
+
+function zipDir(name, tree, extraArgs = []) {
+  const dir = join(root, `${name}-src`);
+  for (const [path, content] of Object.entries(tree)) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), content);
+  }
+  const out = join(root, name);
+  execFileSync('zip', ['-qr', ...extraArgs, out, '.'], { cwd: dir });
+  return out;
+}
+
+test('zip reader: vsix and browser-extension archives are scanned', () => {
+  const vsixTree = (extra) => ({
+    '[Content_Types].xml': '<Types/>', 'extension.vsixmanifest': '<PackageManifest/>',
+    'extension/package.json': JSON.stringify({ name: 'ext', publisher: 'probe', version: '0.0.1', main: './out/extension.js', scripts: { 'vscode:prepublish': 'tsc', postinstall: 'node x' } }),
+    'extension/out/extension.js': 'exports.activate=()=>{};\n'.repeat(50),
+    ...extra,
+  });
+  const bad = check(zipDir('bad.vsix', vsixTree({ 'extension/out/extension.js.map': '{}' })));
+  assert.equal(bad.code, 1);
+  assert.deepEqual(rules(bad.report), ['source-map']);
+  assert.equal(bad.report.kind, 'vsix');
+  const ok = check(zipDir('ok.vsix', vsixTree({})));
+  assert.equal(ok.code, 0, JSON.stringify(ok.report?.findings));
+  assert.equal(ok.report.package, 'ext@0.0.1 (vsix)');
+  const ext = check(zipDir('ext.zip', {
+    'manifest.json': JSON.stringify({ manifest_version: 3, name: 'probe', version: '1.0', host_permissions: ['<all_urls>'] }),
+    'bg.js': 'x\n', 'src/bg.ts': 'x\n',
+  }));
+  assert.equal(ext.code, 1);
+  assert.deepEqual(rules(ext.report), ['source-dir', 'typescript-source']);
+  assert.match(ext.report.warnings.join('\n'), /broad host access \(<all_urls>\)/);
+  const plain = check(zipDir('plain.zip', { 'a.js': 'x\n' }));
+  assert.equal(plain.code, 0);
+  assert.equal(plain.report.kind, 'generic');
+});
+
+test('zip reader: symlinks are findings, truncated or hostile zips exit 2', () => {
+  const dir = join(root, 'ziplink-src');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'manifest.json'), '{"name":"l","version":"1"}');
+  execFileSync('ln', ['-sf', '/etc/hosts', join(dir, 'hosts')]);
+  const linked = join(root, 'link.zip');
+  execFileSync('zip', ['-qry', linked, '.'], { cwd: dir });
+  const r = check(linked);
+  assert.equal(r.code, 1);
+  assert.deepEqual(rules(r.report), ['archive-integrity']);
+  const whole = readFileSync(zipDir('whole.zip', { 'a.js': 'x'.repeat(5000) }));
+  const truncated = join(root, 'hostile-truncated.zip');
+  writeFileSync(truncated, whole.subarray(0, whole.length - 30));
+  assert.equal(check(truncated).code, 2);
+  const cut = join(root, 'hostile-cut.zip');
+  writeFileSync(cut, Buffer.concat([whole.subarray(0, 60), whole.subarray(whole.length - 200)]));
+  assert.equal(check(cut).code, 2);
 });

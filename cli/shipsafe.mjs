@@ -4,7 +4,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSyn
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gunzipSync } from 'node:zlib';
+import { gunzipSync, inflateRawSync } from 'node:zlib';
 
 const VERSION = '0.1.0';
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -350,8 +350,79 @@ function scanContent(data) {
   return found;
 }
 
+function checkEntryPath(path) {
+  if (path.startsWith('/') || /^[A-Za-z]:/.test(path) || path.split(/[\\/]/).includes('..')) {
+    throw new GuardError(`the archive has an entry that escapes its root: ${path}`);
+  }
+}
+
+function readZip(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd === -1) throw new GuardError('not a valid zip archive (no end of central directory)');
+  const count = buf.readUInt16LE(eocd + 10);
+  const cdSize = buf.readUInt32LE(eocd + 12);
+  const cdOffset = buf.readUInt32LE(eocd + 16);
+  if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) throw new GuardError('zip64 archives are not supported');
+  if (buf.readUInt16LE(eocd + 4) !== 0 || buf.readUInt16LE(eocd + 6) !== 0) throw new GuardError('multi-disk zip archives are not supported');
+  if (cdOffset + cdSize > eocd) throw new GuardError('the zip archive is truncated (central directory out of range)');
+  const entries = [];
+  let off = cdOffset;
+  let total = 0;
+  for (let n = 0; n < count; n++) {
+    if (off + 46 > buf.length || buf.readUInt32LE(off) !== 0x02014b50) throw new GuardError(`malformed zip central directory at byte ${off}`);
+    const flags = buf.readUInt16LE(off + 8);
+    const method = buf.readUInt16LE(off + 10);
+    const compSize = buf.readUInt32LE(off + 20);
+    const size = buf.readUInt32LE(off + 24);
+    const nameLen = buf.readUInt16LE(off + 28);
+    const extraLen = buf.readUInt16LE(off + 30);
+    const commentLen = buf.readUInt16LE(off + 32);
+    const mode = buf.readUInt32LE(off + 38) >>> 16;
+    const local = buf.readUInt32LE(off + 42);
+    const path = buf.subarray(off + 46, off + 46 + nameLen).toString('utf8');
+    off += 46 + nameLen + extraLen + commentLen;
+    checkEntryPath(path);
+    if (flags & 1) throw new GuardError(`encrypted zip entry ${path} cannot be scanned`);
+    if (path.endsWith('/')) { entries.push({ path, type: '5', size: 0, data: Buffer.alloc(0), linkname: '' }); continue; }
+    if (local + 30 > buf.length || buf.readUInt32LE(local) !== 0x04034b50) throw new GuardError(`malformed zip local header for ${path}`);
+    const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+    if (start + compSize > buf.length) throw new GuardError(`the zip archive is truncated (${path})`);
+    total += size;
+    if (total > MAX_UNPACKED_BYTES) throw new GuardError(`the zip archive unpacks to more than ${MAX_UNPACKED_BYTES} bytes; refusing to scan it`);
+    const comp = buf.subarray(start, start + compSize);
+    let data;
+    if (method === 0) data = comp;
+    else if (method === 8) {
+      try {
+        data = inflateRawSync(comp, { maxOutputLength: Math.max(size, 1) });
+      } catch (e) {
+        throw new GuardError(`cannot inflate zip entry ${path}: ${e.message}`);
+      }
+    } else throw new GuardError(`zip entry ${path} uses unsupported compression method ${method}`);
+    if (data.length !== size) throw new GuardError(`zip entry ${path} inflates to ${data.length} bytes, header says ${size}`);
+    const link = (mode & 0o170000) === 0o120000;
+    entries.push({ path, type: link ? '2' : '0', size, data: link ? Buffer.alloc(0) : data, linkname: link ? data.toString('utf8') : '' });
+  }
+  return entries;
+}
+
 function openTarball(file) {
   const raw = Buffer.isBuffer(file) ? file : readFileSync(file);
+  if (raw.length >= 4 && raw.readUInt32LE(0) === 0x04034b50 || raw.length >= 22 && raw.readUInt32LE(raw.length - 22) === 0x06054b50) {
+    const all = readZip(raw);
+    if (!all.length) throw new GuardError('the zip archive is empty');
+    const names = new Set(all.map((e) => e.path));
+    const vsix = names.has('extension/package.json') && (names.has('extension.vsixmanifest') || names.has('[Content_Types].xml'));
+    const entries = vsix
+      ? all.filter((e) => e.path.startsWith('extension/')).map((e) => ({ ...e, rel: e.path.slice(10) })).filter((e) => e.rel)
+      : all.map((e) => ({ ...e, rel: e.path.replace(/\/$/, '') }));
+    const files = entries.filter((e) => e.type === '0').map((e) => ({ path: e.rel, size: e.size, data: e.data }));
+    const kind = vsix ? 'vsix' : names.has('manifest.json') ? 'webext' : 'generic';
+    return { raw, entries, files, kind, format: 'zip' };
+  }
   let tar;
   try {
     tar = raw[0] === 0x1f && raw[1] === 0x8b ? gunzipSync(raw, { maxOutputLength: MAX_UNPACKED_BYTES }) : raw;
@@ -359,25 +430,47 @@ function openTarball(file) {
     if (e.code === 'ERR_BUFFER_TOO_LARGE' || e instanceof RangeError) throw new GuardError(`${file} unpacks to more than ${MAX_UNPACKED_BYTES} bytes; refusing to scan it`);
     throw new GuardError(`cannot gunzip ${file}: ${e.message}`);
   }
-  const entries = readTar(tar);
+  const entries = readTar(tar).map((e) => ({ ...e, rel: stripRoot(e.path) }));
   if (!entries.length) throw new GuardError('the tarball is empty');
   const files = entries
     .filter((e) => e.type === '0' || e.type === '7')
-    .map((e) => ({ path: stripRoot(e.path), size: e.size, data: e.data }));
-  return { raw, entries, files };
+    .map((e) => ({ path: e.rel, size: e.size, data: e.data }));
+  return { raw, entries, files, kind: files.some((f) => f.path === 'package.json') ? 'npm' : 'generic', format: 'tar' };
+}
+
+const KIND_RULES = {
+  vsix: new Set(Object.keys(RULES).filter((r) => r !== 'lifecycle-script' && r !== 'publish-intent')),
+  webext: new Set([...DIR_RULES, 'typescript-source', 'source-dir', 'test-path', 'file-size']),
+  generic: DIR_RULES,
+};
+const BROAD_HOSTS = new Set(['<all_urls>', '*://*/*', 'http://*/*', 'https://*/*', '*://*/', 'http://*/', 'https://*/']);
+
+function webextWarnings(files) {
+  const f = files.findLast((x) => x.path === 'manifest.json');
+  let m;
+  try {
+    m = JSON.parse(f.data.toString('utf8'));
+  } catch {
+    return [{ name: undefined, version: undefined }, ['manifest.json is not valid JSON']];
+  }
+  const hosts = [...(m.host_permissions ?? []), ...(m.permissions ?? []), ...(m.optional_host_permissions ?? []), ...(m.content_scripts ?? []).flatMap((c) => c?.matches ?? [])];
+  const broad = [...new Set(hosts.filter((h) => typeof h === 'string' && BROAD_HOSTS.has(h)))];
+  return [m, broad.length ? [`manifest.json requests broad host access (${broad.join(', ')}); stores review this closely, narrow it if you can`] : []];
 }
 
 export function checkTarball(file, label, { asset = false } = {}) {
-  const { raw, entries, files } = openTarball(file);
+  const { raw, entries, files, kind, format } = openTarball(file);
   const sha256 = createHash('sha256').update(raw).digest('hex');
-  const generic = asset && !files.some((f) => f.path === 'package.json');
-  const config = generic ? parseConfig({}) : loadConfig(files);
+  if (kind === 'generic' && format === 'tar' && !asset) loadConfig(files);
+  const allowed = KIND_RULES[kind];
+  const config = kind === 'npm' || kind === 'vsix' ? loadConfig(files) : parseConfig({});
+  const [webext, extWarnings] = kind === 'webext' ? webextWarnings(files) : [null, []];
   const findings = [];
-  const warnings = [...config.warnings];
+  const warnings = [...config.warnings, ...extWarnings];
   const integrity = new Map();
   const note = (path, detail) => { if (!integrity.has(path)) integrity.set(path, detail); };
   for (const e of entries) {
-    const path = stripRoot(e.path);
+    const path = e.rel;
     if (e.type === '1' || e.type === '2') note(path, `${e.type === '2' ? 'symlink' : 'hardlink'} to ${e.linkname}; the gate cannot scan what it points at`);
     else if (e.type === '3' || e.type === '4' || e.type === '6') note(path, 'device or fifo entry');
     else if (!['0', '7', '5'].includes(e.type)) note(path, `unknown tar entry type ${JSON.stringify(e.type)}`);
@@ -389,7 +482,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
   }
   const record = (path, hits) => {
     for (const [rule, detail] of hits) {
-      if (generic && !DIR_RULES.has(rule)) continue;
+      if (allowed && !allowed.has(rule)) continue;
       const allow = config.allow.find((a) => a.rule === rule && a.re.test(path));
       if (allow) allow.used = true;
       findings.push({ rule, path, detail, allowed: !!allow, reason: allow?.reason });
@@ -423,7 +516,8 @@ export function checkTarball(file, label, { asset = false } = {}) {
   const report = {
     version: VERSION,
     file: label ?? resolve(file),
-    package: generic ? 'release asset (no package.json)' : `${config.name}@${config.version}`,
+    kind,
+    package: kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
     manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
     files: files.length,
@@ -881,7 +975,7 @@ function findDeploy(prog, args, cwd) {
   return null;
 }
 const GH_VALUE_OPTS = new Set(['-t', '--title', '-n', '--notes', '-F', '--notes-file', '--target', '--discussion-category', '-R', '--repo', '--notes-start-tag', '--notes-from-tag']);
-const SCANNABLE_ASSET = /\.(tgz|tar\.gz)$/i;
+const SCANNABLE_ASSET = /\.(tgz|tar\.gz|zip|vsix)$/i;
 
 function findReleaseAssets(args, cwd) {
   const pos = deployPositionals(args, GH_VALUE_OPTS);
@@ -1132,7 +1226,7 @@ const USAGE = `shipsafe ${VERSION}
 
 Usage:
   shipsafe check <file.tgz>... [--json | --format text|json|sarif|markdown]
-                                       scan packed npm tarballs; exit 1 on any finding, 2 on any error
+                                       scan npm tarballs, .vsix and browser-extension .zip; exit 1 on any finding, 2 on any error
   shipsafe check-dir <dir>... [--json | --format ...]
                                        scan a static build output (maps, sourcesContent, credentials, secrets, buckets)
   shipsafe verify <file.tgz> [--registry <url>] [--json]

@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), '../cli/shipsafe.mjs');
@@ -780,4 +780,38 @@ test('the hook asks before Python and Rust publishes that were not checked', (t)
   }
   assert.equal(hook('cargo publish --dry-run', crateDir), null);
   assert.equal(hook('cargo build --release', crateDir), null);
+});
+
+test('verify compares wheels with PyPI and crates with the crates.io index', async (t) => {
+  const proj = pyProject('py-verify', {});
+  if (!proj) { t.skip('uv build is not available'); return; }
+  const sha = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
+  const crateDir = join(root, 'rs-verify');
+  mkdirSync(join(crateDir, 'src'), { recursive: true });
+  writeFileSync(join(crateDir, 'Cargo.toml'), '[package]\nname = "rs-verify"\nversion = "0.3.0"\nedition = "2021"\ndescription = "x"\nlicense = "MIT"\n');
+  writeFileSync(join(crateDir, 'src/main.rs'), 'fn main() {}\n');
+  const crateOk = spawnSync('cargo', ['package', '--allow-dirty', '--no-verify', '-q'], { cwd: crateDir }).status === 0;
+  const crate = join(crateDir, 'target/package/rs-verify-0.3.0.crate');
+  const docs = {
+    'pypi/py-verify/0.1.0/json': { urls: [{ filename: basename(proj.wheel), digests: { sha256: sha(proj.wheel) } }, { filename: basename(proj.sdist), digests: { sha256: 'f'.repeat(64) } }] },
+  };
+  await withRegistry(docs, async (registry) => {
+    const ok = await runAsync(['verify', proj.wheel, '--registry', registry, '--json']);
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.equal(JSON.parse(ok.stdout).package, 'py-verify@0.1.0');
+    const other = await runAsync(['verify', proj.sdist, '--registry', registry]);
+    assert.equal(other.code, 1);
+    assert.match(other.stdout, /different file/);
+  });
+  if (!crateOk) return;
+  const indexLine = (cksum) => `${JSON.stringify({ name: 'rs-verify', vers: '0.1.0', cksum: '0'.repeat(64) })}\n${JSON.stringify({ name: 'rs-verify', vers: '0.3.0', cksum })}\n`;
+  const server = createServer((req, res) => { res.writeHead(req.url === '/rs/-v/rs-verify' ? 200 : 404); res.end(req.url === '/rs/-v/rs-verify' ? indexLine(sha(crate)) : ''); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const r = await runAsync(['verify', crate, '--registry', `http://127.0.0.1:${server.address().port}`]);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /index checksum matches/);
+  } finally {
+    server.close();
+  }
 });

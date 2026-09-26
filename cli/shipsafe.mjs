@@ -1007,8 +1007,56 @@ async function fetchPackument(registry, name, full = false) {
   }
 }
 
+async function fetchJson(url, what) {
+  let res;
+  try {
+    res = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(30000) });
+  } catch (e) {
+    throw new GuardError(`cannot reach ${new URL(url).origin}: ${e.cause?.code ?? e.message}`);
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new GuardError(`${what} answered HTTP ${res.status}`);
+  return res.text();
+}
+
+function crateIndexPath(name) {
+  const n = name.toLowerCase();
+  if (n.length <= 2) return `${n.length}/${n}`;
+  if (n.length === 3) return `3/${n[0]}/${n}`;
+  return `${n.slice(0, 2)}/${n.slice(2, 4)}/${n}`;
+}
+
+async function verifyEcosystem(file, opened, registryFlag) {
+  const eco = ecosystemSetup(opened.kind, opened.files, file);
+  if (!eco.name || !eco.version) throw new GuardError(`the ${opened.kind} carries no name and version`);
+  const sha256 = createHash('sha256').update(opened.raw).digest('hex');
+  const base = { version: VERSION, file: resolve(file), package: `${eco.name}@${eco.version}`, integrity: `sha256-${sha256}` };
+  if (opened.kind === 'crate') {
+    const registry = String(registryFlag ?? 'https://index.crates.io').replace(/\/+$/, '');
+    const text = await fetchJson(`${registry}/${crateIndexPath(eco.name)}`, 'the crates index');
+    const line = (text ?? '').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((e) => e?.vers === eco.version);
+    if (!line) return { ...base, registry, published: null, match: false, reason: `${eco.name}@${eco.version} is not in the index at ${registry}` };
+    const match = line.cksum === sha256;
+    return { ...base, registry, published: `sha256-${line.cksum}`, match, reason: match ? 'the index checksum matches this file' : 'the index lists a different checksum; cargo publish re-packaged the tree, so a mismatch is expected unless this is the file cargo uploaded' };
+  }
+  const registry = String(registryFlag ?? 'https://pypi.org').replace(/\/+$/, '');
+  const text = await fetchJson(`${registry}/pypi/${encodeURIComponent(eco.name)}/${encodeURIComponent(eco.version)}/json`, 'the PyPI JSON API');
+  let doc = null;
+  try {
+    doc = text ? JSON.parse(text) : null;
+  } catch {
+    throw new GuardError('the PyPI JSON API returned something that is not JSON');
+  }
+  const entry = doc?.urls?.find((u) => u.filename === basename(file));
+  if (!entry) return { ...base, registry, published: null, match: false, reason: `${basename(file)} is not among the files of ${eco.name} ${eco.version} on ${registry}` };
+  const match = entry.digests?.sha256 === sha256;
+  return { ...base, registry, published: `sha256-${entry.digests?.sha256}`, match, reason: match ? 'the registry holds exactly this file' : 'the registry holds a different file under this name' };
+}
+
 export async function verifyTarball(file, registryFlag) {
-  const { raw, files } = openTarball(file);
+  const opened = openTarball(file);
+  if (['wheel', 'sdist', 'crate'].includes(opened.kind)) return verifyEcosystem(file, opened, registryFlag);
+  const { raw, files } = opened;
   const config = loadConfig(files);
   const { name, version } = config;
   if (typeof name !== 'string' || typeof version !== 'string') throw new GuardError('package.json needs a name and a version');
@@ -1739,7 +1787,7 @@ Usage:
   shipsafe check-dir <dir>... [--json | --format ...]
                                        scan a static build output (maps, sourcesContent, credentials, secrets, buckets)
   shipsafe verify <file.tgz> [--registry <url>] [--json]
-                                       exit 0 only if the registry's dist.integrity for name@version equals this file
+                                       exit 0 only if the registry holds this exact file (npm, PyPI, crates.io)
   shipsafe diff <new.tgz> [<old.tgz> | --against <name@version|dist-tag>] [--registry <url>] [--json | --format markdown]
                                        list added, removed and grown files and label risk-raising changes (default: against latest)
   shipsafe audit <name> [--versions <n>] [--registry <url>] [--json]

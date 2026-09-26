@@ -1,0 +1,44 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this repo is
+
+`release-guard`: a Claude Code plugin plus a standalone npm CLI that stop npm packages from shipping source by accident (source maps, `sourcesContent`, TypeScript sources, `src/`/test paths, credential files, oversized files, storage-bucket URLs). It prevents accidental leaks; it does not make JS unreversable, and docs must never claim otherwise. npm only for now; PyPI and crates are planned.
+
+## Commands
+
+- All tests: `npm test` (runs `node --test tests/*.test.mjs`; `node --test tests/` fails because Node treats the dir as a module).
+- One test: `node --test --test-name-pattern "inline and remote" tests/gate.test.mjs`
+- Gate a tarball: `node cli/release-guard.mjs check <file.tgz> [--json]` (exit 0 pass, 1 findings, 2 usage/config error).
+- Dogfood the CLI package: `cd cli && npm pack --pack-destination /tmp && node release-guard.mjs check /tmp/release-guard-<version>.tgz` must PASS.
+- Validate the plugin: `claude plugin validate . --strict` and `claude plugin validate .claude-plugin/plugin.json --strict` (neither parses skill frontmatter). This file sits in `.claude/` because a root `CLAUDE.md` makes the strict plugin validation fail.
+- Live hook check: `echo "<prompt>" | claude -p --model haiku --plugin-dir . --allowedTools "Bash(npm publish *)"` from a temp dir holding a `"private": true` package and `--registry http://127.0.0.1:9`, so a hook failure still cannot publish. Pass the prompt on stdin: `--allowedTools` is variadic and swallows a positional prompt.
+
+No build step and no dependencies: the CLI is one plain ESM file for Node 18+.
+
+## Architecture
+
+The repo root is simultaneously the plugin root and a single-plugin marketplace (`.claude-plugin/marketplace.json` with `source: "./"`). The npm package is the `cli/` subdirectory only; the root `package.json` is `private` and exists for `npm test`.
+
+`cli/release-guard.mjs` is the single source of truth for both consumers:
+
+- `check` mode is what CI and humans run.
+- `hook` mode is what `hooks/hooks.json` runs (exec form: `node ${CLAUDE_PLUGIN_ROOT}/cli/release-guard.mjs hook`). It reads the PreToolUse JSON on stdin, finds publish invocations in the Bash command, and re-runs the same `checkTarball()` on the named `.tgz`. It only ever emits `deny` or nothing; it never returns `allow`, so normal permission prompts still apply to a clean publish.
+
+Key design decisions (do not reverse without the user):
+
+- No receipts/hash cache: the hook re-scans the exact tarball at publish time, so nothing can be forged or go stale.
+- Config lives in the PACKED `package.json` under `releaseGuard` (`maxFileBytes`, `allow[]` with mandatory `reason`), so CI and the hook judge the same artifact identically. There are deliberately no CLI flags that change rules.
+- `yarn npm publish` is always denied (it cannot publish a prebuilt tarball); `--dry-run` publishes pass; a publish with no `.tgz` argument is denied.
+- Content rules are written so the gate's own source does not trip them (`sourcesContent` must be followed by `:`; inline maps need `data:<letter>`). Keep that property when adding rules, or the dogfood check fails.
+- The four `if` filters in `hooks/hooks.json` (`Bash(npm*publish*)` etc.) only limit when the hook spawns; exact detection happens in `findPublishes()` (shell-ish tokenizer, `cd` tracking, wrapper/env stripping, value-taking option skipping). Claude Code's `if` matching is best-effort, and publishes hidden in `npm run <script>` are out of reach by design.
+
+Tarball parsing is hand-written (gzip via `node:zlib`, ustar + pax + GNU longname) to stay zero-dependency; entries are rooted by stripping the first path segment (`package/`).
+
+## Plugin constraints
+
+- No top-level `bin/`: claude.ai and Cowork refuse a plugin that has one. The CLI lives in `cli/`.
+- `plugin.json` pins `version`; bump it on every release, together with `cli/package.json` and `VERSION` in `cli/release-guard.mjs`.
+- The `safe-publish` skill stops before the publish command: the human runs it and types the OTP. Never add token storage or reading of token values.
+- Tests build real fixtures with `npm pack` in a temp dir; keep them that way rather than hand-crafting tar bytes.

@@ -1,0 +1,19 @@
+{
+  "name": "release-guard",
+  "version": "0.1.0",
+  "description": "Stops accidental source leaks when publishing to npm: a tarball gate, a PreToolUse hook that blocks unchecked publishes, and a skill for the safe build-pack-check-publish procedure.",
+  "author": {
+    "name": "Nia D Pham",
+    "email": "xinchao@nghia-pham.com"
+  },
+  "homepage": "https://github.com/cyberinecore/cc-release-guard",
+  "repository": "https://github.com/cyberinecore/cc-release-guard",
+  "license": "MIT",
+  "keywords": [
+    "npm",
+    "publish",
+    "release",
+    "sourcemap",
+    "supply-chain"
+  ]
+}

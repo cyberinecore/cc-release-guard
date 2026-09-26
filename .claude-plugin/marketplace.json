@@ -1,0 +1,15 @@
+{
+  "name": "release-guard",
+  "owner": {
+    "name": "Nia D Pham",
+    "email": "xinchao@nghia-pham.com"
+  },
+  "description": "Release-safety plugins: stop npm packages from shipping source by accident.",
+  "plugins": [
+    {
+      "name": "release-guard",
+      "source": "./",
+      "description": "Tarball gate, publish-blocking hook and safe-publish skill for npm packages."
+    }
+  ]
+}

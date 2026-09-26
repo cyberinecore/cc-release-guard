@@ -1,0 +1,33 @@
+{
+  "name": "release-guard",
+  "version": "0.1.0",
+  "description": "Deterministic npm tarball gate: fails a packed .tgz that ships source maps, embedded sources, TypeScript sources, src/ or test paths, oversized files, or storage-bucket URLs.",
+  "type": "module",
+  "bin": {
+    "release-guard": "release-guard.mjs"
+  },
+  "files": [
+    "release-guard.mjs"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "npm",
+    "publish",
+    "tarball",
+    "sourcemap",
+    "release",
+    "ci"
+  ],
+  "author": "Nia D Pham <xinchao@nghia-pham.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/cyberinecore/cc-release-guard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cyberinecore/cc-release-guard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cyberinecore/cc-release-guard/issues"
+  }
+}

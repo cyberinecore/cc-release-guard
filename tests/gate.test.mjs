@@ -248,3 +248,19 @@ test('publish intent: private, scoped access, registry mismatch and prerelease o
   assert.equal(hook(`npm publish ${scopedConfigured} --registry https://registry.npmjs.org`), null);
   assert.match(hook(`npm publish ${scopedConfigured} --registry http://127.0.0.1:4873`).permissionDecisionReason, /contradicts publishConfig\.registry/);
 });
+
+test('entry points in main, types, bin and exports must exist in the tarball', () => {
+  const files = { 'dist/index.js': 'x\n', 'dist/index.d.ts': 'x\n', 'dist/feat/a.js': 'x\n', 'bin/cli.js': 'x\n', 'lib/index.js': 'x\n' };
+  const ok = check(pack('entry-ok', files, {
+    main: './lib', types: 'dist/index.d.ts', bin: { tool: './bin/cli.js' },
+    exports: { '.': { types: './dist/index.d.ts', import: './dist/index.js', default: './dist/index.js' }, './feat/*': './dist/feat/*.js', './internal/*': null, './package.json': './package.json' },
+  }));
+  assert.equal(ok.code, 0, JSON.stringify(ok.report?.findings));
+  const bad = check(pack('entry-bad', files, {
+    main: 'dist/missing.js', bin: './bin/nope.js',
+    exports: { '.': { node: { import: './dist/index.mjs' }, default: './dist/index.js' }, './x/*': ['./dist/x/*.js'] },
+  }));
+  assert.equal(bad.code, 1);
+  assert.deepEqual(rules(bad.report), ['entry-point']);
+  assert.deepEqual(bad.report.findings.map((f) => f.path).sort(), ['package.json#bin', 'package.json#exports["./x/*"][0]', 'package.json#exports["."]["node"]["import"]', 'package.json#main'].sort());
+});

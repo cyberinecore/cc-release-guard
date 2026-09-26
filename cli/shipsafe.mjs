@@ -37,6 +37,7 @@ const RULES = {
   'bucket-url': 'URL to a storage bucket',
   'lifecycle-script': 'install script that runs on every consumer machine',
   'publish-intent': 'package metadata that contradicts a public release',
+  'entry-point': 'main, module, types, bin or exports target missing from the tarball',
   'archive-integrity': 'link, device or duplicate entry the scan cannot vouch for',
 };
 
@@ -173,7 +174,7 @@ function loadConfig(files) {
   });
   const scripts = json.scripts && typeof json.scripts === 'object' ? json.scripts : {};
   const publishConfig = json.publishConfig && typeof json.publishConfig === 'object' ? json.publishConfig : {};
-  return { name: json.name, version: json.version, private: json.private === true, publishConfig, maxFileBytes, allow, scripts };
+  return { name: json.name, version: json.version, private: json.private === true, publishConfig, maxFileBytes, allow, scripts, pkg: json };
 }
 
 function isPrerelease(version) {
@@ -187,6 +188,37 @@ function optionValue(args, name) {
     else if (args[i].startsWith(`${name}=`)) value = args[i].slice(name.length + 1);
   }
   return value;
+}
+
+function entryTargets(pkg) {
+  const out = [];
+  for (const key of ['main', 'module', 'types', 'typings']) if (typeof pkg[key] === 'string') out.push([key, pkg[key], key === 'main']);
+  if (typeof pkg.browser === 'string') out.push(['browser', pkg.browser, true]);
+  if (typeof pkg.bin === 'string') out.push(['bin', pkg.bin, false]);
+  else if (pkg.bin && typeof pkg.bin === 'object') for (const [k, v] of Object.entries(pkg.bin)) if (typeof v === 'string') out.push([`bin.${k}`, v, false]);
+  const walk = (node, key) => {
+    if (typeof node === 'string') out.push([key, node, false]);
+    else if (Array.isArray(node)) node.forEach((n, i) => walk(n, `${key}[${i}]`));
+    else if (node && typeof node === 'object') for (const [k, v] of Object.entries(node)) walk(v, `${key}[${JSON.stringify(k)}]`);
+  };
+  walk(pkg.exports, 'exports');
+  return out;
+}
+
+function missingEntryPoints(pkg, present) {
+  const missing = [];
+  for (const [key, target, legacy] of entryTargets(pkg)) {
+    if (key.startsWith('exports') && !target.startsWith('./')) continue;
+    const rel = target.replace(/^(\.\/)+/, '').replace(/\/+$/, '');
+    if (rel.includes('*')) {
+      const re = new RegExp(`^${rel.split('*').map((p) => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.+')}$`);
+      if (![...present].some((f) => re.test(f))) missing.push([key, target]);
+      continue;
+    }
+    const candidates = legacy ? [rel, `${rel}.js`, `${rel}.json`, `${rel}.node`, `${rel}/index.js`, `${rel}/index.json`] : [rel];
+    if (!candidates.some((c) => present.has(c))) missing.push([key, target]);
+  }
+  return missing;
 }
 
 function scanPath(path) {
@@ -270,6 +302,8 @@ export function checkTarball(file) {
   } else if (isPrerelease(config.version) && !config.publishConfig.tag) {
     warnings.push(`prerelease ${config.version} goes to the latest dist-tag unless you publish with --tag <name>`);
   }
+  const present = new Set(files.map((f) => f.path));
+  for (const [key, target] of missingEntryPoints(config.pkg, present)) record(`package.json#${key}`, [['entry-point', `${target} is not in the tarball`]]);
   if (!config.scripts.install && !config.scripts.preinstall && files.some((f) => f.path === 'binding.gyp')) {
     record('package.json#install', [['lifecycle-script', 'implicit `node-gyp rebuild` because binding.gyp ships']]);
   }

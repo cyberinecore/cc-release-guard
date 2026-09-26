@@ -36,6 +36,7 @@ const RULES = {
   'file-size': 'file over the size threshold',
   'bucket-url': 'URL to a storage bucket',
   'lifecycle-script': 'install script that runs on every consumer machine',
+  'publish-intent': 'package metadata that contradicts a public release',
   'archive-integrity': 'link, device or duplicate entry the scan cannot vouch for',
 };
 
@@ -171,7 +172,21 @@ function loadConfig(files) {
     return { ...a, re: globToRegex(a.path), used: false };
   });
   const scripts = json.scripts && typeof json.scripts === 'object' ? json.scripts : {};
-  return { name: json.name, version: json.version, maxFileBytes, allow, scripts };
+  const publishConfig = json.publishConfig && typeof json.publishConfig === 'object' ? json.publishConfig : {};
+  return { name: json.name, version: json.version, private: json.private === true, publishConfig, maxFileBytes, allow, scripts };
+}
+
+function isPrerelease(version) {
+  return typeof version === 'string' && /^\d+\.\d+\.\d+-/.test(version);
+}
+
+function optionValue(args, name) {
+  let value;
+  for (let i = 0; i < args.length && args[i] !== '--'; i++) {
+    if (args[i] === name) value = args[i + 1];
+    else if (args[i].startsWith(`${name}=`)) value = args[i].slice(name.length + 1);
+  }
+  return value;
 }
 
 function scanPath(path) {
@@ -249,6 +264,12 @@ export function checkTarball(file) {
   for (const name of INSTALL_SCRIPTS) {
     if (typeof config.scripts[name] === 'string') record(`package.json#${name}`, [['lifecycle-script', config.scripts[name].slice(0, 120)]]);
   }
+  if (config.private) record('package.json#private', [['publish-intent', '"private": true; npm refuses it, other managers may not']]);
+  if (isPrerelease(config.version) && config.publishConfig.tag === 'latest') {
+    record('package.json#publishConfig.tag', [['publish-intent', `prerelease ${config.version} pinned to the latest dist-tag`]]);
+  } else if (isPrerelease(config.version) && !config.publishConfig.tag) {
+    warnings.push(`prerelease ${config.version} goes to the latest dist-tag unless you publish with --tag <name>`);
+  }
   if (!config.scripts.install && !config.scripts.preinstall && files.some((f) => f.path === 'binding.gyp')) {
     record('package.json#install', [['lifecycle-script', 'implicit `node-gyp rebuild` because binding.gyp ships']]);
   }
@@ -264,6 +285,7 @@ export function checkTarball(file) {
     version: VERSION,
     file: resolve(file),
     package: `${config.name}@${config.version}`,
+    manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
     files: files.length,
     unpackedBytes,
@@ -466,7 +488,7 @@ function scanSegment(seg, cwd, ctx) {
   }
   const pos = positionals(args);
   const dryRun = args.some((a) => a === '--dry-run' || a === '--dry-run=true');
-  const base = { cwd, dryRun, computed: ctx.computed };
+  const base = { cwd, dryRun, computed: ctx.computed, tag: optionValue(args, '--tag'), access: optionValue(args, '--access'), registry: optionValue(args, '--registry') };
   if (prog === 'yarn' && pos[0] === 'npm' && pos[1] === 'publish') {
     ctx.out.push({ ...base, manager: 'yarn npm', tarballArg: null, unsupported: true });
     return cwd;
@@ -504,8 +526,25 @@ function evaluatePublish(p) {
   } catch (e) {
     return `shipsafe could not check ${t.path}: ${e.message}`;
   }
-  if (r.pass) return null;
-  return `shipsafe check failed for ${t.path}:\n${formatReport(r)}`;
+  if (!r.pass) return `shipsafe check failed for ${t.path}:\n${formatReport(r)}`;
+  return intentProblem(p, r.manifest, t.path);
+}
+
+function intentProblem(p, m, file) {
+  const cmd = `${p.manager} publish ${file}`;
+  const pc = m.publishConfig;
+  if (typeof m.name === 'string' && m.name.startsWith('@') && !p.access && !pc.access) {
+    return `${m.name} is scoped and neither --access nor publishConfig.access says who may see it. State it: \`${cmd} --access public\` (or --access restricted).`;
+  }
+  const norm = (u) => String(u).replace(/\/+$/, '');
+  if (p.registry && pc.registry && norm(p.registry) !== norm(pc.registry)) {
+    return `--registry ${p.registry} contradicts publishConfig.registry ${pc.registry} in the packed package.json. Drop one so the target is unambiguous.`;
+  }
+  const tag = p.tag ?? pc.tag ?? 'latest';
+  if (isPrerelease(m.version) && tag === 'latest') {
+    return `${m.name}@${m.version} is a prerelease and would become the latest dist-tag for every installer. Publish it with \`${cmd} --tag next\`.`;
+  }
+  return null;
 }
 
 function runHook() {

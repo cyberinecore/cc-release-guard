@@ -227,3 +227,24 @@ test('install lifecycle scripts fail unless allowed per script with a reason', (
   assert.equal(gyp.code, 1);
   assert.match(gyp.report.findings[0].detail, /binding\.gyp/);
 });
+
+test('publish intent: private, scoped access, registry mismatch and prerelease on latest', () => {
+  const priv = check(pack('intent-private', { 'index.js': 'x\n' }, { private: true }));
+  assert.equal(priv.code, 1);
+  assert.deepEqual(rules(priv.report), ['publish-intent']);
+  const pinned = check(pack('intent-pinned', { 'index.js': 'x\n' }, { version: '2.0.0-beta.1', publishConfig: { tag: 'latest' } }));
+  assert.deepEqual(rules(pinned.report), ['publish-intent']);
+  const pre = pack('intent-pre', { 'index.js': 'x\n' }, { version: '2.0.0-beta.1' });
+  assert.match(check(pre).report.warnings.join('\n'), /latest dist-tag/);
+  assert.match(hook(`npm publish ${pre}`).permissionDecisionReason, /--tag next/);
+  assert.equal(hook(`npm publish ${pre} --tag next`), null);
+  assert.equal(hook(`npm publish ${pre} --tag=beta`), null);
+  const scoped = pack('intent-scoped', { 'index.js': 'x\n' }, { name: '@probe/intent-scoped' });
+  assert.match(hook(`npm publish ${scoped}`).permissionDecisionReason, /--access public/);
+  assert.equal(hook(`npm publish ${scoped} --access public`), null);
+  assert.equal(hook(`npm publish ${scoped} --access=restricted`), null);
+  const scopedConfigured = pack('intent-scoped-config', { 'index.js': 'x\n' }, { name: '@probe/intent-scoped-config', publishConfig: { access: 'public', registry: 'https://registry.npmjs.org/' } });
+  assert.equal(hook(`npm publish ${scopedConfigured}`), null);
+  assert.equal(hook(`npm publish ${scopedConfigured} --registry https://registry.npmjs.org`), null);
+  assert.match(hook(`npm publish ${scopedConfigured} --registry http://127.0.0.1:4873`).permissionDecisionReason, /contradicts publishConfig\.registry/);
+});

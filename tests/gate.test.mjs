@@ -134,3 +134,16 @@ test('check accepts several tarballs and exits with the worst result', () => {
   assert.equal(JSON.parse(missing.stdout)[1].error.length > 0, true);
   assert.equal(check(good).report.pass, true);
 });
+
+test('the hook sees publishes behind runners, shells, eval, xargs and find', () => {
+  for (const c of ['npx npm publish', 'npx --yes npm@10 publish', 'bunx npm publish', 'corepack pnpm publish', 'pnpm dlx npm publish', 'pnpm exec npm publish', 'npm exec -- npm publish', 'npm exec -c "npm publish"', 'bash -c "npm publish"', "sh -c 'cd x && npm publish'", 'zsh -lc "npx npm publish"', 'eval npm publish', `ls ${root}/*.tgz | xargs npm publish`, `find ${root} -name 'good-*.tgz' -exec npm publish {} \;`]) {
+    assert.equal(hook(c)?.permissionDecision, 'deny', c);
+  }
+  assert.match(hook(`ls ${good} | xargs -n1 npm publish`).permissionDecisionReason, /xargs or find/);
+  assert.equal(hook(`bash -c "npm publish ${good}"`), null);
+  assert.equal(hook(`npx npm@10 publish ${good}`), null);
+  assert.equal(hook(`sh -c 'npm publish ${leaky}'`)?.permissionDecision, 'deny');
+  for (const c of ['npm exec foo', 'npx eslint .', 'bash -c "npm test"', 'ls | xargs rm', 'find . -exec cat {} +']) {
+    assert.equal(hook(c), null, c);
+  }
+});

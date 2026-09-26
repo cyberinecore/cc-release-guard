@@ -345,38 +345,114 @@ function resolveTarball(arg, cwd) {
   return { path: full };
 }
 
+const RUNNERS = new Set(['npx', 'bunx', 'pnpx', 'corepack']);
+const RUNNER_SUBCOMMANDS = new Set(['exec', 'x', 'dlx']);
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+const RUNNER_VALUE_OPTS = new Set(['-p', '--package', '--shell-mode']);
+const XARGS_VALUE_OPTS = new Set(['-I', '-J', '-L', '-n', '-P', '-s', '-E', '-d', '-a', '-R', '-S']);
+const MAX_NESTING = 8;
+
+function firstPositional(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') return i + 1 < args.length ? i + 1 : -1;
+    if (a.startsWith('-')) {
+      if (!a.includes('=') && VALUE_OPTS.has(a)) i++;
+      continue;
+    }
+    return i;
+  }
+  return -1;
+}
+
+function stripRunnerOpts(args, ctx) {
+  let i = 0;
+  while (i < args.length && args[i].startsWith('-')) {
+    const a = args[i];
+    if (a === '--') return args.slice(i + 1);
+    if (a === '-c' || a === '--call') {
+      if (args[i + 1] !== undefined) scanCommand(args[i + 1], ctx.cwd, ctx);
+      return [];
+    }
+    i += !a.includes('=') && RUNNER_VALUE_OPTS.has(a) ? 2 : 1;
+  }
+  return args.slice(i);
+}
+
+function scanSegment(seg, cwd, ctx) {
+  if (ctx.depth > MAX_NESTING) throw new GuardError('the command nests shells or runners too deeply');
+  const t = unwrap(seg);
+  if (!t.length) return cwd;
+  const prog = basename(t[0]).replace(/^(.+?)@.*$/, '$1');
+  const nested = (tokens, computed = ctx.computed) => scanSegment(tokens, cwd, { ...ctx, depth: ctx.depth + 1, computed });
+  if (prog === 'cd') {
+    const target = t[1];
+    if (target && target !== '-' && !/[$`]/.test(target)) return expandPath(target, cwd);
+    return cwd;
+  }
+  if (SHELLS.has(prog)) {
+    const i = t.findIndex((a, k) => k > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a));
+    if (i !== -1 && t[i + 1] !== undefined) scanCommand(t[i + 1], cwd, { ...ctx, depth: ctx.depth + 1 });
+    return cwd;
+  }
+  if (prog === 'eval') {
+    scanCommand(t.slice(1).join(' '), cwd, { ...ctx, depth: ctx.depth + 1 });
+    return cwd;
+  }
+  if (prog === 'xargs') {
+    let i = 1;
+    while (i < t.length && t[i].startsWith('-')) i += XARGS_VALUE_OPTS.has(t[i]) ? 2 : 1;
+    nested(t.slice(i), true);
+    return cwd;
+  }
+  if (prog === 'find') {
+    const i = t.findIndex((a) => a === '-exec' || a === '-execdir' || a === '-ok' || a === '-okdir');
+    if (i !== -1) {
+      const rest = t.slice(i + 1);
+      const stop = rest.findIndex((a) => a === ';' || a === '+');
+      nested(stop === -1 ? rest : rest.slice(0, stop), true);
+    }
+    return cwd;
+  }
+  if (RUNNERS.has(prog)) {
+    nested(stripRunnerOpts(t.slice(1), { ...ctx, cwd, depth: ctx.depth + 1 }));
+    return cwd;
+  }
+  if (!MANAGERS.has(prog)) return cwd;
+  const args = t.slice(1);
+  const first = firstPositional(args);
+  if (first !== -1 && RUNNER_SUBCOMMANDS.has(args[first]) && !(prog === 'yarn' && args[first] === 'x')) {
+    nested(stripRunnerOpts(args.slice(first + 1), { ...ctx, cwd, depth: ctx.depth + 1 }));
+    return cwd;
+  }
+  const pos = positionals(args);
+  const dryRun = args.some((a) => a === '--dry-run' || a === '--dry-run=true');
+  const base = { cwd, dryRun, computed: ctx.computed };
+  if (prog === 'yarn' && pos[0] === 'npm' && pos[1] === 'publish') {
+    ctx.out.push({ ...base, manager: 'yarn npm', tarballArg: null, unsupported: true });
+    return cwd;
+  }
+  const idx = pos.indexOf('publish');
+  if (idx === -1) return cwd;
+  if (idx > 0 && NON_PUBLISH_COMMANDS.has(pos[0])) return cwd;
+  ctx.out.push({ ...base, manager: prog, tarballArg: pos[idx + 1] ?? null, unsupported: false });
+  return cwd;
+}
+
+function scanCommand(command, cwd, ctx) {
+  for (const seg of tokenize(command)) cwd = scanSegment(seg, cwd, ctx);
+}
+
 export function findPublishes(command, startCwd) {
   const out = [];
-  let cwd = startCwd;
-  for (const seg of tokenize(command)) {
-    const t = unwrap(seg);
-    if (!t.length) continue;
-    const prog = basename(t[0]);
-    if (prog === 'cd') {
-      const target = t[1];
-      if (target && target !== '-' && !/[$`]/.test(target)) cwd = expandPath(target, cwd);
-      continue;
-    }
-    if (!MANAGERS.has(prog)) continue;
-    const args = t.slice(1);
-    const pos = positionals(args);
-    const dryRun = args.some((a) => a === '--dry-run' || a === '--dry-run=true');
-    if (prog === 'yarn' && pos[0] === 'npm' && pos[1] === 'publish') {
-      out.push({ manager: 'yarn npm', cwd, dryRun, tarballArg: null, unsupported: true });
-      continue;
-    }
-    const idx = pos.indexOf('publish');
-    if (idx === -1) continue;
-    if (idx > 0 && NON_PUBLISH_COMMANDS.has(pos[0])) continue;
-    const target = pos[idx + 1] ?? null;
-    out.push({ manager: prog, cwd, dryRun, tarballArg: target, unsupported: false });
-  }
+  scanCommand(command, startCwd, { out, depth: 0, computed: false });
   return out;
 }
 
 function evaluatePublish(p) {
   const cmd = `${p.manager} publish`;
   if (p.dryRun) return null;
+  if (p.computed) return `\`${cmd}\` gets its tarball from xargs or find, so shipsafe cannot see which file ships. Name the checked .tgz literally: \`${cmd} <file>.tgz\`.`;
   if (p.unsupported) return `\`${cmd}\` cannot publish a prebuilt tarball. Pack, run \`shipsafe check <file>.tgz\`, then publish that file with \`npm publish <file>.tgz\`.`;
   if (!p.tarballArg) return `\`${cmd}\` without a tarball publishes the working tree, which nothing has checked. Build, pack (\`npm pack\`), run \`shipsafe check <file>.tgz\`, then \`${cmd} <file>.tgz\`.`;
   if (!/\.(tgz|tar\.gz)$/i.test(p.tarballArg)) return `\`${cmd} ${p.tarballArg}\` does not name a .tgz tarball. Publish only a packed tarball that passed \`shipsafe check\`.`;

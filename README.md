@@ -67,6 +67,7 @@ Publish the file the gate checked, never the working tree: `npm pack --dry-run` 
 
 - The hook sees commands Claude runs. A publish inside `npm run release`, a script, or a terminal outside Claude Code is not intercepted; run the gate in CI for those.
 - Command matching is best-effort by design: it targets accidents, not a user deliberately bypassing it.
+- The hook looks through `sh|bash|zsh -c`, `eval`, `npx`, `bunx`, `corepack` and `npm|pnpm|yarn exec|dlx`. A publish fed its tarball by `xargs` or `find -exec` is always denied, because the file that ships cannot be known before it runs.
 - npm only for now. PyPI and crates.io are planned.
 
 ## License

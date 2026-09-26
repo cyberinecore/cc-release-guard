@@ -6,28 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "if": "Bash(npm*publish*)",
-            "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs", "hook"],
-            "timeout": 300
-          },
-          {
-            "type": "command",
-            "if": "Bash(pnpm*publish*)",
-            "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs", "hook"],
-            "timeout": 300
-          },
-          {
-            "type": "command",
-            "if": "Bash(bun*publish*)",
-            "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs", "hook"],
-            "timeout": 300
-          },
-          {
-            "type": "command",
-            "if": "Bash(yarn*publish*)",
+            "if": "Bash(*publish*)",
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs", "hook"],
             "timeout": 300

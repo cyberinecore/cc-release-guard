@@ -687,7 +687,7 @@ test('Helm charts: leak rules, values-file secrets, subcharts and helm push', ()
   assert.equal(r.code, 1, r.stderr);
   assert.equal(r.report.kind, 'helm');
   assert.equal(r.report.package, 'webapp@0.1.0 (Helm chart)');
-  const found = r.report.findings.map((f) => `${f.rule} ${f.path}`).sort();
+  const found = r.report.findings.map((f) => `${f.rule} ${f.path.replace('charts/subchart/', 'charts/subchart-0.1.0.tgz/')}`).sort();
   assert.deepEqual(found, ['secret-token charts/subchart-0.1.0.tgz/values.yaml', 'secret-token values.yaml', 'sensitive-file files/tls.key']);
   const values = r.report.findings.find((f) => f.path === 'values.yaml');
   assert.match(values.detail, /line 4: password has a literal value \(14 chars\)/);

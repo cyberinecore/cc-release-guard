@@ -396,6 +396,9 @@ test('diff lists file changes and labels risk-raising changes', async () => {
   const text = await runAsync(['diff', newTgz, oldTgz]);
   assert.match(text.stdout, /RISK  new-lifecycle-script +package\.json#postinstall/);
   assert.match(text.stdout, /ADD   dist\/c\.js/);
+  const md = await runAsync(['diff', newTgz, oldTgz, '--format', 'markdown']);
+  assert.match(md.stdout, /^### shipsafe diff: `diffpkg@1\.1\.0` vs `diffpkg@1\.0\.0`/);
+  assert.match(md.stdout, /\| `new-bin` \| two -> \.\/dist\/c\.js \|/);
   const doc = { 'dist-tags': { latest: '1.0.0' }, versions: { '1.0.0': { dist: {} } } };
   await withRegistry({ diffpkg: doc, '-/diffpkg-1.0.0.tgz': readFileSync(oldTgz) }, async (registry) => {
     doc.versions['1.0.0'].dist.tarball = `${registry}/-/diffpkg-1.0.0.tgz`;
@@ -408,4 +411,30 @@ test('diff lists file changes and labels risk-raising changes', async () => {
     assert.equal(none.code, 0);
     assert.match(none.stdout, /no baseline/);
   });
+});
+
+test('check emits SARIF 2.1.0 and a markdown summary', () => {
+  const allowed = pack('sarif-allowed', { 'index.js': 'fetch("https://pub-1.r2.dev/x")\n' }, { shipsafe: { allow: [{ rule: 'bucket-url', path: '*.js', reason: 'documented public bucket' }] } });
+  const r = spawnSync('node', [CLI, 'check', leaky, allowed, '--format', 'sarif'], { encoding: 'utf8' });
+  assert.equal(r.status, 1);
+  const sarif = JSON.parse(r.stdout);
+  assert.equal(sarif.version, '2.1.0');
+  assert.equal(sarif.runs.length, 1);
+  const { driver } = sarif.runs[0].tool;
+  assert.equal(driver.name, 'shipsafe');
+  const ruleIds = new Set(driver.rules.map((x) => x.id));
+  for (const res of sarif.runs[0].results) {
+    assert.ok(ruleIds.has(res.ruleId), res.ruleId);
+    assert.ok(res.message.text.length > 0);
+    assert.ok(res.locations[0].physicalLocation.artifactLocation.uri.length > 0);
+    assert.ok(!res.locations[0].physicalLocation.artifactLocation.uri.includes('#'));
+  }
+  assert.ok(sarif.runs[0].results.some((x) => x.ruleId === 'source-map' && !x.suppressions));
+  assert.equal(sarif.runs[0].results.find((x) => x.ruleId === 'bucket-url').suppressions[0].justification, 'documented public bucket');
+  const md = spawnSync('node', [CLI, 'check', leaky, '--format=markdown'], { encoding: 'utf8' });
+  assert.equal(md.status, 1);
+  assert.match(md.stdout, /^### shipsafe: FAIL `leaky@1\.0\.0`/);
+  assert.match(md.stdout, /\| \*\*FAIL\*\* \| `source-map` \| `dist\/index\.js\.map` \|/);
+  assert.match(md.stdout, /File inventory \(\d+\)/);
+  assert.equal(spawnSync('node', [CLI, 'check', good, '--format', 'xml'], { encoding: 'utf8' }).status, 2);
 });

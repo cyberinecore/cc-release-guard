@@ -356,7 +356,7 @@ export function checkTarball(file) {
     record(f.path, hits);
   }
   for (const a of config.allow) if (!a.used) warnings.push(`unused allow entry: ${a.rule} ${a.path}`);
-  return {
+  const report = {
     version: VERSION,
     file: resolve(file),
     package: `${config.name}@${config.version}`,
@@ -368,6 +368,84 @@ export function checkTarball(file) {
     findings,
     warnings,
   };
+  Object.defineProperty(report, 'inventory', { value: files.map((f) => ({ path: f.path, size: f.size })), enumerable: false });
+  return report;
+}
+
+const FORMATS = ['text', 'json', 'sarif', 'markdown'];
+const REPO_URL = 'https://github.com/cyberinecore/cc-release-guard';
+
+const mdCell = (v) => String(v ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+
+function toSarif(reports) {
+  const results = [];
+  const used = new Set();
+  for (const r of reports) {
+    if (r.error) {
+      used.add('tarball-error');
+      results.push({ ruleId: 'tarball-error', level: 'error', message: { text: `${r.file}: ${r.error}` }, locations: [{ physicalLocation: { artifactLocation: { uri: basename(r.file) } } }] });
+      continue;
+    }
+    for (const f of r.findings) {
+      used.add(f.rule);
+      const uri = f.path.split('#')[0];
+      const text = `${f.rule} in ${r.package}: ${f.path}${f.detail ? ` (${f.detail})` : ''}. ${RULES[f.rule]}.`;
+      const result = {
+        ruleId: f.rule,
+        level: 'error',
+        message: { text },
+        locations: [{ physicalLocation: { artifactLocation: { uri }, region: { startLine: 1 } } }],
+        partialFingerprints: { shipsafeFinding: createHash('sha256').update(`${r.package.replace(/@[^@]*$/, '')}|${f.rule}|${f.path}`).digest('hex').slice(0, 32) },
+        properties: { tarball: r.file, package: r.package, sha256: r.sha256 },
+      };
+      if (f.allowed) result.suppressions = [{ kind: 'external', justification: f.reason }];
+      results.push(result);
+    }
+  }
+  const descriptions = { ...RULES, 'tarball-error': 'the tarball could not be read or its config is invalid' };
+  const rules = [...used].sort().map((id) => ({ id, name: id, shortDescription: { text: descriptions[id] }, defaultConfiguration: { level: 'error' }, helpUri: `${REPO_URL}#rules` }));
+  return {
+    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
+    version: '2.1.0',
+    runs: [{ tool: { driver: { name: 'shipsafe', version: VERSION, informationUri: REPO_URL, rules } }, results }],
+  };
+}
+
+function checkMarkdown(r) {
+  if (r.error) return `### shipsafe: ERROR \`${basename(r.file)}\`\n\n${mdCell(r.error)}`;
+  const lines = [
+    `### shipsafe: ${r.pass ? 'PASS' : 'FAIL'} \`${r.package}\``,
+    '',
+    `\`${basename(r.file)}\` · sha256 \`${r.sha256}\` · ${r.files} files · ${r.unpackedBytes} bytes unpacked`,
+  ];
+  if (r.findings.length) {
+    lines.push('', '| result | rule | path | detail |', '|---|---|---|---|');
+    for (const f of r.findings) lines.push(`| ${f.allowed ? 'allowed' : '**FAIL**'} | \`${f.rule}\` | \`${mdCell(f.path)}\` | ${mdCell(f.allowed ? `${f.detail ? `${f.detail}; ` : ''}exception: ${f.reason}` : f.detail)} |`);
+  }
+  if (r.warnings.length) lines.push('', ...r.warnings.map((w) => `- warning: ${mdCell(w)}`));
+  if (r.inventory) {
+    lines.push('', `<details><summary>File inventory (${r.inventory.length})</summary>`, '', '| path | bytes |', '|---|---|');
+    for (const f of r.inventory) lines.push(`| \`${mdCell(f.path)}\` | ${f.size} |`);
+    lines.push('', '</details>');
+  }
+  return lines.join('\n');
+}
+
+function diffMarkdown(d) {
+  const lines = [`### shipsafe diff: \`${d.new}\` vs \`${d.old ?? 'nothing'}\``, ''];
+  if (!d.old) return [...lines, `No baseline: nothing published to compare against (${mdCell(d.source)}).`].join('\n');
+  lines.push(`${d.added.length} added · ${d.removed.length} removed · ${d.grown.length} grown · ${d.risks.length} risk label(s)`);
+  if (d.risks.length) {
+    lines.push('', '| risk | detail |', '|---|---|');
+    for (const r of d.risks) lines.push(`| \`${r.label}\` | ${mdCell(r.detail)} |`);
+  }
+  const changes = [...d.added.map((f) => ['added', f.path, `${f.size}`]), ...d.removed.map((f) => ['removed', f.path, `${f.size}`]), ...d.grown.map((f) => ['grown', f.path, `${f.from} -> ${f.to}`])];
+  if (changes.length) {
+    lines.push('', `<details><summary>File changes (${changes.length})</summary>`, '', '| change | path | bytes |', '|---|---|---|');
+    for (const [c, p, b] of changes) lines.push(`| ${c} | \`${mdCell(p)}\` | ${b} |`);
+    lines.push('', '</details>');
+  }
+  return lines.join('\n');
 }
 
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
@@ -798,10 +876,11 @@ function runHook() {
 const USAGE = `shipsafe ${VERSION}
 
 Usage:
-  shipsafe check <file.tgz>... [--json] scan packed npm tarballs; exit 1 on any finding, 2 on any error
+  shipsafe check <file.tgz>... [--json | --format text|json|sarif|markdown]
+                                       scan packed npm tarballs; exit 1 on any finding, 2 on any error
   shipsafe verify <file.tgz> [--registry <url>] [--json]
                                        exit 0 only if the registry's dist.integrity for name@version equals this file
-  shipsafe diff <new.tgz> [<old.tgz> | --against <name@version|dist-tag>] [--registry <url>] [--json]
+  shipsafe diff <new.tgz> [<old.tgz> | --against <name@version|dist-tag>] [--registry <url>] [--json | --format markdown]
                                        list added, removed and grown files and label risk-raising changes (default: against latest)
   shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin)
   shipsafe --version
@@ -832,8 +911,7 @@ async function runVerify(rest) {
 }
 
 async function runDiff(rest) {
-  const json = rest.includes('--json');
-  const args = rest.filter((a) => a !== '--json');
+  const { format, args } = takeFormat(rest);
   let registry;
   let against;
   const files = [];
@@ -847,13 +925,13 @@ async function runDiff(rest) {
   }
   const bad = !files.length || files.length > 2 || files.some((f) => !f || f.startsWith('-')) || (files.length === 2 && against !== undefined)
     || (registry !== undefined && !/^https?:\/\//.test(registry)) || against === '';
-  if (bad) { console.error(USAGE); return 2; }
+  if (bad || !format || format === 'sarif') { console.error(USAGE); return 2; }
   try {
     const next = openTarball(files[0]);
     const base = await loadBaseline(next, against, files[1], registry);
     const d = diffPackages(next, base.opened);
     d.source = base.source;
-    console.log(json ? JSON.stringify(d, null, 2) : formatDiff(d, base.source));
+    console.log(format === 'json' ? JSON.stringify(d, null, 2) : format === 'markdown' ? diffMarkdown(d) : formatDiff(d, base.source));
     return 0;
   } catch (e) {
     if (!(e instanceof GuardError) && e.code !== 'ENOENT' && e.code !== 'EISDIR') throw e;
@@ -862,40 +940,58 @@ async function runDiff(rest) {
   }
 }
 
+function takeFormat(rest) {
+  let format = 'text';
+  const args = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--json') format = 'json';
+    else if (a === '--format') format = rest[++i];
+    else if (a.startsWith('--format=')) format = a.slice(9);
+    else args.push(a);
+  }
+  return { format: FORMATS.includes(format) ? format : null, args };
+}
+
+function runCheck(rest) {
+  const { format, args: files } = takeFormat(rest);
+  if (!format || !files.length || files.some((f) => f.startsWith('-'))) { console.error(USAGE); return 2; }
+  const reports = [];
+  let code = 0;
+  for (const [i, file] of files.entries()) {
+    if (format === 'text' && i > 0) console.log('');
+    try {
+      const r = checkTarball(file);
+      reports.push(r);
+      if (format === 'text') console.log(formatReport(r));
+      if (!r.pass) code = Math.max(code, 1);
+    } catch (e) {
+      if (!(e instanceof GuardError) && e.code !== 'ENOENT' && e.code !== 'EISDIR') throw e;
+      console.error(`shipsafe: ${files.length > 1 ? `${file}: ` : ''}${e.message}`);
+      reports.push({ version: VERSION, file: resolve(file), pass: false, error: e.message });
+      code = 2;
+    }
+  }
+  if (format === 'json') {
+    const out = files.length === 1 ? reports[0] : reports;
+    if (!out.error) console.log(JSON.stringify(out, null, 2));
+  } else if (format === 'sarif') {
+    console.log(JSON.stringify(toSarif(reports), null, 2));
+  } else if (format === 'markdown') {
+    console.log(reports.map(checkMarkdown).join('\n\n'));
+  } else if (files.length > 1) {
+    console.log(`\n${reports.filter((r) => r.pass).length}/${files.length} tarball(s) passed`);
+  }
+  return code;
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === '--version' || cmd === '-v') { console.log(VERSION); return 0; }
   if (cmd === 'hook') return runHook();
   if (cmd === 'verify') return runVerify(rest);
   if (cmd === 'diff') return runDiff(rest);
-  if (cmd === 'check') {
-    const json = rest.includes('--json');
-    const files = rest.filter((a) => a !== '--json');
-    if (!files.length || files.some((f) => f.startsWith('-'))) { console.error(USAGE); return 2; }
-    const reports = [];
-    let code = 0;
-    for (const [i, file] of files.entries()) {
-      if (!json && i > 0) console.log('');
-      try {
-        const r = checkTarball(file);
-        reports.push(r);
-        if (!json) console.log(formatReport(r));
-        if (!r.pass) code = Math.max(code, 1);
-      } catch (e) {
-        if (!(e instanceof GuardError) && e.code !== 'ENOENT' && e.code !== 'EISDIR') throw e;
-        console.error(`shipsafe: ${files.length > 1 ? `${file}: ` : ''}${e.message}`);
-        reports.push({ version: VERSION, file: resolve(file), pass: false, error: e.message });
-        code = 2;
-      }
-    }
-    if (json) {
-      const out = files.length === 1 ? reports[0] : reports;
-      if (!out.error) console.log(JSON.stringify(out, null, 2));
-    } else if (files.length > 1) {
-      console.log(`\n${reports.filter((r) => r.pass).length}/${files.length} tarball(s) passed`);
-    }
-    return code;
-  }
+  if (cmd === 'check') return runCheck(rest);
   console.error(USAGE);
   return cmd === undefined || cmd === '--help' || cmd === '-h' ? 0 : 2;
 }

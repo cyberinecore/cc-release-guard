@@ -26,3 +26,25 @@ jobs:
           mkdir -p ../out
           npm pack --pack-destination ../out
           node shipsafe.mjs check ../out/*.tgz
+
+  report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pack and gate the CLI package
+        run: |
+          mkdir -p out
+          (cd cli && npm pack --pack-destination ../out)
+          node cli/shipsafe.mjs check out/*.tgz --format markdown >> "$GITHUB_STEP_SUMMARY"
+          node cli/shipsafe.mjs check out/*.tgz --format sarif > out/shipsafe.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('out/shipsafe.sarif') != ''
+        with:
+          sarif_file: out/shipsafe.sarif
+          category: shipsafe

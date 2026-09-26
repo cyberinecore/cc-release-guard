@@ -61,11 +61,13 @@ Then confirm the version is still free (npm never lets a version be republished)
 
 ## 4. Hand over the publish
 
-Everything above happens before the user fetches an OTP, because a code lasts about 30 seconds and a failed build burns it. Give the user one line to run themselves, with the absolute tarball path from the gate's PASS line:
+Everything above happens before the user fetches an OTP, because a code lasts about 30 seconds and a failed build burns it. Give the user one line to run themselves, with the absolute tarball path from the gate's PASS line and the absolute path of this plugin's CLI written out (the user's shell has no `CLAUDE_PLUGIN_ROOT`), so the gate re-runs on the same file in the same line:
 
 ```sh
-! npm publish /abs/path/<name>-<version>.tgz --access public --otp <code>
+! node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" check /abs/path/<name>-<version>.tgz && npm publish /abs/path/<name>-<version>.tgz --access public --otp <code>
 ```
+
+Keep the `check && publish` form even though the gate just passed: it has not been verified whether the hook fires for commands the user types with `!`, so the line carries its own gate.
 
 The plugin's hook re-runs the gate on that exact file when Claude runs a publish command and blocks `npm publish` / `pnpm publish` / `bun publish` without a passing tarball (also behind `npx`, `corepack`, `bash -c`, `eval`), `yarn npm publish` always (it cannot publish a prebuilt tarball), release orchestrators (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`), a scoped package without an explicit `--access`, and a prerelease headed for the `latest` tag. It does not see publishes hidden inside `npm run <script>` or run outside Claude Code, so CI must run the gate itself.
 

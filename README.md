@@ -95,7 +95,7 @@ Publish the file the gate checked, never the working tree: `npm pack --dry-run` 
 
 ## Limits
 
-- The hook fires in every permission mode, `bypassPermissions` included (checked 2026-09-27 with a headless session). Whether it fires for commands the user types with the `!` prefix has not been verified, so a publish the user runs by hand should run the gate in the same line.
+- The hook fires in every permission mode, `bypassPermissions` included (checked 2026-09-27 with a headless session). Whether it fires for commands the user types with the `!` prefix has not been verified, so a publish the user runs by hand should run the gate in the same line: `shipsafe check x.tgz && npm publish x.tgz`, which is the line `/shipsafe:release` hands over.
 - The hook sees commands Claude runs. A publish inside `npm run release`, a script, or a terminal outside Claude Code is not intercepted; run the gate in CI for those.
 - Command matching is best-effort by design: it targets accidents, not a user deliberately bypassing it.
 - Release orchestrators that pack and publish on their own (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`) are denied outside their dry-run modes, with a pack, gate, publish-each-tarball recipe. `npm stage publish <file>.tgz` is gated like `npm publish`. Publishes inside `npm run <script>`, Makefiles, or a CI job are not intercepted.

@@ -35,6 +35,7 @@ const RULES = {
   'sensitive-file': 'credential or VCS file',
   'file-size': 'file over the size threshold',
   'bucket-url': 'URL to a storage bucket',
+  'secret-token': 'credential string inside a shipped file',
   'lifecycle-script': 'install script that runs on every consumer machine',
   'publish-intent': 'package metadata that contradicts a public release',
   'entry-point': 'main, module, types, bin or exports target missing from the tarball',
@@ -53,6 +54,16 @@ const BUCKET_HOSTS = [
   /\b(?:[a-z0-9.-]+\.)?digitaloceanspaces\.com\b/gi,
   /\b(?:[a-z0-9.-]+\.)?backblazeb2\.com\b/gi,
   /\b(?:[a-z0-9.-]+\.)?wasabisys\.com\b/gi,
+];
+
+const SECRET_PATTERNS = [
+  ['AWS access key', /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, 4],
+  ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{36,255}\b/g, 4],
+  ['GitHub token', /\bgithub_pat_[A-Za-z0-9_]{22,255}\b/g, 11],
+  ['npm token', /\bnpm_[A-Za-z0-9]{36}\b/g, 4],
+  ['Stripe live key', /\b[rs]k_live_[A-Za-z0-9]{20,247}\b/g, 8],
+  ['Slack token', /\bxox[abpr]-[A-Za-z0-9-]{10,250}/g, 5],
+  ['private key block', /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/g, 10],
 ];
 
 class GuardError extends Error {}
@@ -242,6 +253,12 @@ function scanContent(data) {
   if (inline) found.push(['inline-source-map', inline[0]]);
   const remote = text.match(/sourceMappingURL=https?:\/\/[^\s'"`)]{1,200}/);
   if (remote) found.push(['remote-source-map', remote[0]]);
+  const secrets = [];
+  for (const [kind, re, keep] of SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    for (const m of text.matchAll(re)) secrets.push(`${kind} ${m[0].slice(0, keep)}... (${m[0].length} chars)`);
+  }
+  if (secrets.length) found.push(['secret-token', secrets.slice(0, 5).join(', ') + (secrets.length > 5 ? `, +${secrets.length - 5} more` : '')]);
   const hosts = new Map();
   for (const re of BUCKET_HOSTS) {
     re.lastIndex = 0;

@@ -278,3 +278,24 @@ test('release orchestrators are denied with a pack-gate-publish hint; npm stage 
   assert.equal(hook(`npm stage publish ${good}`), null);
   assert.match(hook(`npm stage publish ${leaky}`).permissionDecisionReason, /source-map/);
 });
+
+test('secret tokens in shipped files fail with a redacted detail', () => {
+  const fake = (prefix, n, ch = 'A') => prefix + ch.repeat(n);
+  const tokens = [
+    fake('AK' + 'IA', 16), fake('AS' + 'IA', 16), fake('gh' + 'p_', 36, 'a'), fake('gh' + 's_', 36, 'b'), fake('github' + '_pat_', 40, 'c'),
+    fake('np' + 'm_', 36, 'd'), fake('sk' + '_live_', 24, 'e'), fake('rk' + '_live_', 24, 'f'), fake('xo' + 'xb-', 20, '1'),
+    '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----',
+  ];
+  const files = Object.fromEntries(tokens.map((t, i) => [`dist/t${i}.js`, `const k = "${t}";\n`]));
+  const r = check(pack('secrets', files));
+  assert.equal(r.code, 1);
+  assert.deepEqual(rules(r.report), ['secret-token']);
+  assert.equal(r.report.findings.length, tokens.length);
+  for (const [i, t] of tokens.entries()) {
+    const f = r.report.findings.find((x) => x.path === `dist/t${i}.js`);
+    assert.ok(f, t.slice(0, 6));
+    assert.ok(!f.detail.includes(t), 'detail must be redacted');
+    assert.match(f.detail, new RegExp(`\\(${t.length} chars\\)`));
+  }
+  assert.equal(check(pack('not-secrets', { 'index.js': 'const a = "AKIA_NOT_A_KEY"; const b = "-----BEGIN PUBLIC KEY-----"; const c = "ghp_short";\n' })).code, 0);
+});

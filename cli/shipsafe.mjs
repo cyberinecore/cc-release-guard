@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 
@@ -178,6 +178,10 @@ function loadConfig(files) {
   } catch (e) {
     throw new GuardError(`package.json is not valid JSON: ${e.message}`);
   }
+  return parseConfig(json);
+}
+
+function parseConfig(json) {
   const raw = json.shipsafe ?? {};
   const configWarnings = [];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new GuardError('shipsafe config in package.json must be an object');
@@ -240,6 +244,64 @@ function missingEntryPoints(pkg, present) {
     if (!candidates.some((c) => present.has(c))) missing.push([key, target]);
   }
   return missing;
+}
+
+const DIR_RULES = new Set(['source-map', 'sources-content', 'inline-source-map', 'remote-source-map', 'sensitive-file', 'secret-token', 'bucket-url', 'build-artifact', 'archive-integrity']);
+const SKIP_DIRS = new Set(['node_modules']);
+
+function nearestPackageJson(dir) {
+  for (let d = dir; ; d = dirname(d)) {
+    const p = join(d, 'package.json');
+    if (existsSync(p)) return p;
+    if (dirname(d) === d) return null;
+  }
+}
+
+export function checkDirectory(dir) {
+  const root = resolve(dir);
+  if (!existsSync(root) || !statSync(root).isDirectory()) throw new GuardError(`not a directory: ${root}`);
+  const pkgPath = nearestPackageJson(root);
+  let json = {};
+  if (pkgPath) {
+    try {
+      json = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    } catch (e) {
+      throw new GuardError(`${pkgPath} is not valid JSON: ${e.message}`);
+    }
+  }
+  const config = parseConfig(json);
+  const findings = [];
+  const warnings = [...config.warnings];
+  const record = (path, hits) => {
+    for (const [rule, detail] of hits) {
+      if (!DIR_RULES.has(rule)) continue;
+      const allow = config.allow.find((a) => a.rule === rule && a.re.test(path));
+      if (allow) allow.used = true;
+      findings.push({ rule, path, detail, allowed: !!allow, reason: allow?.reason });
+    }
+  };
+  let count = 0;
+  let bytes = 0;
+  const walk = (abs) => {
+    for (const name of readdirSync(abs).sort()) {
+      const full = join(abs, name);
+      const rel = relative(root, full).split('\\').join('/');
+      const st = lstatSync(full);
+      if (st.isSymbolicLink()) { record(rel, [['archive-integrity', 'symlink; the deploy may upload what it points at, which was not scanned']]); continue; }
+      if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) walk(full); continue; }
+      if (!st.isFile()) continue;
+      count++;
+      bytes += st.size;
+      if (bytes > MAX_UNPACKED_BYTES) throw new GuardError(`${root} holds more than ${MAX_UNPACKED_BYTES} bytes; refusing to scan it`);
+      const data = readFileSync(full);
+      const hits = [...scanPath(rel), ...scanContent(data)];
+      if (isMetafile(rel, data)) hits.push(['build-artifact', 'esbuild metafile']);
+      record(rel, hits);
+    }
+  };
+  walk(root);
+  for (const a of config.allow) if (!a.used) warnings.push(`unused allow entry: ${a.rule} ${a.path}`);
+  return { version: VERSION, kind: 'directory', file: root, package: pkgPath ? `config ${pkgPath}` : 'no package.json config', files: count, unpackedBytes: bytes, pass: findings.every((f) => f.allowed), findings, warnings };
 }
 
 function scanPath(path) {
@@ -416,7 +478,7 @@ function checkMarkdown(r) {
   const lines = [
     `### shipsafe: ${r.pass ? 'PASS' : 'FAIL'} \`${r.package}\``,
     '',
-    `\`${basename(r.file)}\` · sha256 \`${r.sha256}\` · ${r.files} files · ${r.unpackedBytes} bytes unpacked`,
+    r.kind === 'directory' ? `\`${r.file}\` · ${r.files} files · ${r.unpackedBytes} bytes` : `\`${basename(r.file)}\` · sha256 \`${r.sha256}\` · ${r.files} files · ${r.unpackedBytes} bytes unpacked`,
   ];
   if (r.findings.length) {
     lines.push('', '| result | rule | path | detail |', '|---|---|---|---|');
@@ -624,7 +686,7 @@ function formatVerify(r) {
 }
 
 function formatReport(r) {
-  const lines = [`shipsafe ${r.version}  ${r.package}  ${r.file}`, `sha256 ${r.sha256}  files ${r.files}  unpacked ${r.unpackedBytes} bytes`];
+  const lines = [`shipsafe ${r.version}  ${r.package}  ${r.file}`, r.kind === 'directory' ? `files ${r.files}  ${r.unpackedBytes} bytes` : `sha256 ${r.sha256}  files ${r.files}  unpacked ${r.unpackedBytes} bytes`];
   for (const f of r.findings) {
     const tag = f.allowed ? 'ALLOW' : 'FAIL ';
     const detail = f.detail ? `: ${f.detail}` : '';
@@ -637,6 +699,8 @@ function formatReport(r) {
     lines.push(`FAIL  ${blocking.length} finding(s). ${rules.join('; ')}`);
     const script = blocking.find((f) => f.rule === 'lifecycle-script');
     if (script) lines.push(`HINT  a native addon build such as \`node-gyp rebuild\` is a legitimate install script; allow it in the packed package.json with "shipsafe": { "allow": [{ "rule": "lifecycle-script", "path": "${script.path}", "reason": "<why consumers must run it>" }] }`);
+  } else if (r.kind === 'directory') {
+    lines.push(`PASS  deploy exactly this directory: ${r.file}`);
   } else {
     lines.push(`PASS  publish exactly this file: npm publish ${r.file}`);
   }
@@ -688,7 +752,7 @@ function unwrap(tokens) {
     const head = basename(t[0]);
     if (head === 'env') {
       t = t.slice(1);
-      while (t.length && (t[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[0]))) t = t.slice(1);
+      while (t.length && (t[0].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[0]))) t = t.slice(['-u', '--unset', '-C', '--chdir', '-P'].includes(t[0]) ? 2 : 1);
     } else if (head === 'timeout') {
       t = t.slice(1);
       while (t.length && t[0].startsWith('-')) t = t.slice(1);
@@ -740,6 +804,80 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
 const RUNNER_VALUE_OPTS = new Set(['-p', '--package', '--shell-mode']);
 const XARGS_VALUE_OPTS = new Set(['-I', '-J', '-L', '-n', '-P', '-s', '-E', '-d', '-a', '-R', '-S']);
 const MAX_NESTING = 8;
+const DEPLOY_VALUE_OPTS = {
+  wrangler: new Set(['--project-name', '--branch', '--commit-hash', '--commit-message', '--env', '-e', '--config', '-c', '--cwd']),
+  vercel: new Set(['--cwd', '--scope', '-S', '--token', '-t', '--env', '-e', '--build-env', '-b', '--meta', '-m', '--target', '--archive', '--local-config', '-A', '--team', '-T']),
+  netlify: new Set(['--dir', '-d', '--site', '-s', '--auth', '-a', '--message', '-m', '--alias', '--functions', '-f', '--filter', '--context', '--branch', '-b']),
+  firebase: new Set(['--only', '--except', '--project', '-P', '--config', '-c', '--message', '-m', '--token']),
+};
+
+const VERCEL_OTHER = new Set(['build', 'dev', 'env', 'ls', 'list', 'rm', 'remove', 'domains', 'dns', 'certs', 'logs', 'inspect', 'pull', 'link', 'alias', 'promote', 'rollback', 'redeploy', 'git', 'project', 'projects', 'switch', 'teams', 'whoami', 'login', 'logout', 'help', 'init']);
+
+function deployPositionals(args, valueOpts) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') { out.push(...args.slice(i + 1)); break; }
+    if (a.startsWith('-')) { if (!a.includes('=') && valueOpts.has(a)) i++; continue; }
+    out.push(a);
+  }
+  return out;
+}
+
+function tomlString(file, key) {
+  if (!existsSync(file)) return null;
+  const m = readFileSync(file, 'utf8').match(new RegExp(`^\\s*${key}\\s*=\\s*["']([^"']+)["']`, 'm'));
+  return m ? m[1] : null;
+}
+
+function readJsonFile(file) {
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+  } catch {
+    return null;
+  }
+}
+
+function findDeploy(prog, args, cwd) {
+  const opts = DEPLOY_VALUE_OPTS[prog];
+  const pos = deployPositionals(args, opts);
+  const at = (base, rel) => resolve(base, rel);
+  if (prog === 'wrangler') {
+    if (pos[0] !== 'pages' || !['deploy', 'publish'].includes(pos[1])) return null;
+    const manager = `wrangler pages ${pos[1]}`;
+    const base = optionValue(args, '--cwd') ? at(cwd, optionValue(args, '--cwd')) : cwd;
+    if (pos[2]) return { manager, dirs: [at(base, pos[2])] };
+    const fromConfig = tomlString(join(base, 'wrangler.toml'), 'pages_build_output_dir')
+      ?? readJsonFile(join(base, 'wrangler.json'))?.pages_build_output_dir ?? readJsonFile(join(base, 'wrangler.jsonc'))?.pages_build_output_dir;
+    return fromConfig ? { manager, dirs: [at(base, fromConfig)] } : { manager, error: `\`${manager}\` names no output directory and no pages_build_output_dir was found. Name it: \`${manager} dist\`.` };
+  }
+  if (prog === 'vercel') {
+    if (!args.includes('--prebuilt')) return null;
+    if (pos.length && VERCEL_OTHER.has(pos[0])) return null;
+    const project = pos[0] === 'deploy' ? pos[1] : pos[0];
+    const base = at(optionValue(args, '--cwd') ? at(cwd, optionValue(args, '--cwd')) : cwd, project ?? '.');
+    return { manager: 'vercel deploy --prebuilt', dirs: [join(base, '.vercel/output/static')] };
+  }
+  if (prog === 'netlify' || prog === 'ntl') {
+    if (pos[0] !== 'deploy') return null;
+    const dir = optionValue(args, '--dir') ?? optionValue(args, '-d');
+    if (dir) return { manager: 'netlify deploy', dirs: [at(cwd, dir)] };
+    const fromConfig = tomlString(join(cwd, 'netlify.toml'), 'publish');
+    return fromConfig ? { manager: 'netlify deploy', dirs: [at(cwd, fromConfig)] } : { manager: 'netlify deploy', error: '`netlify deploy` names no directory and netlify.toml has no publish setting. Name it: `netlify deploy --dir dist`.' };
+  }
+  if (prog === 'firebase') {
+    if (pos[0] !== 'deploy') return null;
+    const only = optionValue(args, '--only');
+    if (only && !only.split(',').some((t) => t.trim().split(':')[0] === 'hosting')) return null;
+    const configPath = at(cwd, optionValue(args, '--config') ?? optionValue(args, '-c') ?? 'firebase.json');
+    const hosting = readJsonFile(configPath)?.hosting;
+    const list = (Array.isArray(hosting) ? hosting : hosting ? [hosting] : []).map((h) => h?.public).filter((x) => typeof x === 'string');
+    if (!list.length) return only ? { manager: 'firebase deploy', error: `no hosting.public directory found in ${configPath}; name it there before deploying hosting.` } : null;
+    return { manager: 'firebase deploy', dirs: list.map((d) => at(dirname(configPath), d)) };
+  }
+  return null;
+}
 const ORCHESTRATORS = new Set(['lerna', 'changeset', 'semantic-release', 'release-it', 'np']);
 const ORCHESTRATOR_SAFE_FLAGS = new Set(['--help', '-h', '--version', '-v', '-V', '--dry-run', '-d', '--preview', '--no-publish', '--no-npm', '--no-npm.publish', '--npm.publish=false']);
 
@@ -815,6 +953,11 @@ function scanSegment(seg, cwd, ctx) {
     nested(stripRunnerOpts(t.slice(1), { ...ctx, cwd, depth: ctx.depth + 1 }));
     return cwd;
   }
+  if (prog in DEPLOY_VALUE_OPTS || prog === 'ntl') {
+    const d = findDeploy(prog, t.slice(1), cwd);
+    if (d) ctx.out.push({ ...d, cwd, dryRun: false, computed: ctx.computed, deploy: true });
+    return cwd;
+  }
   if (ORCHESTRATORS.has(prog)) {
     if (orchestratorPublishes(prog, t.slice(1))) ctx.out.push({ cwd, dryRun: false, computed: false, manager: prog === 'lerna' || prog === 'changeset' ? `${prog} publish` : prog, orchestrator: true });
     return cwd;
@@ -855,7 +998,23 @@ export function findPublishes(command, startCwd) {
   return out;
 }
 
+function evaluateDeploy(p) {
+  if (p.error) return p.error;
+  for (const dir of p.dirs) {
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) return `\`${p.manager}\` output directory not found: ${dir}. Build first, then run \`shipsafe check-dir ${dir}\`.`;
+    let r;
+    try {
+      r = checkDirectory(dir);
+    } catch (e) {
+      return `shipsafe could not check ${dir}: ${e.message}`;
+    }
+    if (!r.pass) return `shipsafe check-dir failed for ${dir}:\n${formatReport(r)}`;
+  }
+  return null;
+}
+
 function evaluatePublish(p) {
+  if (p.deploy) return evaluateDeploy(p);
   const cmd = `${p.manager} publish`;
   if (p.dryRun) return null;
   if (p.orchestrator) return `\`${p.manager}\` packs and publishes on its own, so shipsafe never sees what ships. Pack each package (\`npm pack --workspaces --pack-destination out\`), gate them with \`shipsafe check out/*.tgz\`, then publish each checked file with \`npm publish out/<file>.tgz\`. Dry runs (\`--dry-run\`) pass.`;
@@ -914,7 +1073,7 @@ function runHook() {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
-      permissionDecisionReason: `shipsafe blocked this publish.\n${reasons.join('\n')}`,
+      permissionDecisionReason: `shipsafe blocked this publish or deploy.\n${reasons.join('\n')}`,
     },
   }));
   return 0;
@@ -925,6 +1084,8 @@ const USAGE = `shipsafe ${VERSION}
 Usage:
   shipsafe check <file.tgz>... [--json | --format text|json|sarif|markdown]
                                        scan packed npm tarballs; exit 1 on any finding, 2 on any error
+  shipsafe check-dir <dir>... [--json | --format ...]
+                                       scan a static build output (maps, sourcesContent, credentials, secrets, buckets)
   shipsafe verify <file.tgz> [--registry <url>] [--json]
                                        exit 0 only if the registry's dist.integrity for name@version equals this file
   shipsafe diff <new.tgz> [<old.tgz> | --against <name@version|dist-tag>] [--registry <url>] [--json | --format markdown]
@@ -1002,7 +1163,7 @@ function takeFormat(rest) {
   return { format: FORMATS.includes(format) ? format : null, args };
 }
 
-function runCheck(rest) {
+function runCheck(rest, dirMode = false) {
   const { format, args: files } = takeFormat(rest);
   if (!format || !files.length || files.some((f) => f.startsWith('-'))) { console.error(USAGE); return 2; }
   const reports = [];
@@ -1010,7 +1171,7 @@ function runCheck(rest) {
   for (const [i, file] of files.entries()) {
     if (format === 'text' && i > 0) console.log('');
     try {
-      const r = checkTarball(file);
+      const r = dirMode ? checkDirectory(file) : checkTarball(file);
       reports.push(r);
       if (format === 'text') console.log(formatReport(r));
       if (!r.pass) code = Math.max(code, 1);
@@ -1069,6 +1230,7 @@ function main(argv) {
   if (cmd === 'diff') return runDiff(rest);
   if (cmd === 'audit') return runAudit(rest);
   if (cmd === 'check') return runCheck(rest);
+  if (cmd === 'check-dir') return runCheck(rest, true);
   console.error(USAGE);
   return cmd === undefined || cmd === '--help' || cmd === '-h' ? 0 : 2;
 }

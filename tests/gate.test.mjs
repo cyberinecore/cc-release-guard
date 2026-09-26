@@ -101,7 +101,7 @@ test('the hook ignores commands that do not publish', () => {
 });
 
 test('the hook denies publishing an unchecked working tree', () => {
-  for (const c of ['npm publish', 'npm publish --access public --otp 123456', 'pnpm --filter x publish', 'npm --loglevel warn publish', 'bun publish', 'yarn npm publish', 'FOO=1 timeout 60 npm publish', 'npm publish ./pkgdir']) {
+  for (const c of ['npm publish', 'npm publish --access public --otp 123456', 'pnpm --filter x publish', 'npm --loglevel warn publish', 'bun publish', 'yarn npm publish', 'FOO=1 timeout 60 npm publish', 'env -u A -u B npm publish', 'npm publish ./pkgdir']) {
     assert.equal(hook(c)?.permissionDecision, 'deny', c);
   }
 });
@@ -461,4 +461,36 @@ test('audit gates the last N published versions from a registry', async () => {
     assert.match(tampered.stdout, /does not match dist\.integrity/);
     assert.equal((await runAsync(['audit', 'nope', '--registry', registry])).code, 2);
   });
+});
+
+test('check-dir and the deploy hook guard static build output', () => {
+  const site = join(root, 'site');
+  mkdirSync(join(site, 'dist'), { recursive: true });
+  mkdirSync(join(site, 'clean'), { recursive: true });
+  mkdirSync(join(site, '.vercel/output/static'), { recursive: true });
+  writeFileSync(join(site, 'package.json'), JSON.stringify({ name: 'site', shipsafe: { allow: [{ rule: 'bucket-url', path: 'assets.js', reason: 'public image bucket of the site' }] } }));
+  writeFileSync(join(site, 'dist/app.js'), 'a();\n//# sourceMappingURL=app.js.map\n');
+  writeFileSync(join(site, 'dist/app.js.map'), '{"version":3}');
+  writeFileSync(join(site, 'clean/app.js'), 'a();\n');
+  writeFileSync(join(site, 'clean/assets.js'), 'fetch("https://pub-9.r2.dev/logo.png")\n');
+  writeFileSync(join(site, '.vercel/output/static/index.html'), '<html></html>\n');
+  writeFileSync(join(site, 'firebase.json'), JSON.stringify({ hosting: { public: 'dist' } }));
+  writeFileSync(join(site, 'netlify.toml'), '[build]\n  publish = "clean"\n');
+  const bad = spawnSync('node', [CLI, 'check-dir', join(site, 'dist'), '--json'], { encoding: 'utf8' });
+  assert.equal(bad.status, 1);
+  assert.deepEqual(rules(JSON.parse(bad.stdout)), ['source-map']);
+  const ok = spawnSync('node', [CLI, 'check-dir', join(site, 'clean'), '--json'], { encoding: 'utf8' });
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.equal(JSON.parse(ok.stdout).findings[0].allowed, true);
+  assert.match(hook('wrangler pages deploy dist --project-name site', site).permissionDecisionReason, /source-map/);
+  assert.equal(hook('npx wrangler pages deploy clean', site), null);
+  assert.match(hook('firebase deploy', site).permissionDecisionReason, /check-dir failed/);
+  assert.equal(hook('firebase deploy --only functions', site), null);
+  assert.equal(hook('netlify deploy --prod', site), null);
+  assert.match(hook('netlify deploy --dir=dist', site).permissionDecisionReason, /source-map/);
+  assert.equal(hook('vercel deploy --prebuilt', site), null);
+  assert.equal(hook('vercel env ls --prebuilt', site), null);
+  assert.match(hook('wrangler pages deploy', site).permissionDecisionReason, /names no output directory/);
+  assert.match(hook('wrangler pages deploy missing', site).permissionDecisionReason, /not found/);
+  assert.equal(hook('wrangler deploy', site), null);
 });

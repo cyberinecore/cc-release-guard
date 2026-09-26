@@ -30,6 +30,7 @@ Key design decisions (do not reverse without the user):
 
 - Naming: brand, plugin and marketplace are `shipsafe`; the npm package is `@cyberinecore/shipsafe` (bin `shipsafe`). Every executable reference (npm scope, GitHub repo, marketplace, Action) uses the one handle `cyberinecore`, because the GitHub name `cyberine` belongs to someone else and a `@cyberine` npm scope would invite users to guess `github.com/cyberine/...`. Docs always spell out full install commands.
 - No receipts/hash cache: the hook re-scans the exact tarball at publish time, so nothing can be forged or go stale.
+- `check-dir` (static-site output) reads config from the nearest `package.json` at or above the directory, not from a file inside it, so nothing extra deploys to the CDN. It applies only the leak rules in `DIR_RULES`.
 - Config lives in the PACKED `package.json` under `shipsafe` (`maxFileBytes`, `allow[]` with mandatory `reason`), so CI and the hook judge the same artifact identically. There are deliberately no CLI flags that change rules.
 - `yarn npm publish` is always denied (it cannot publish a prebuilt tarball); `--dry-run` publishes pass; a publish with no `.tgz` argument is denied.
 - Content rules are written so the gate's own source does not trip them (`sourcesContent` must be followed by `:`; inline maps need `data:<letter>`). Keep that property when adding rules, or the dogfood check fails.

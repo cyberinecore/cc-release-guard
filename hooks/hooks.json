@@ -73,6 +73,56 @@
               "hook"
             ],
             "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*wrangler*pages*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*vercel*--prebuilt*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*netlify*deploy*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*ntl*deploy*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*firebase*deploy*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
           }
         ]
       }

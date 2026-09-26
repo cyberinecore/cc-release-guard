@@ -91,6 +91,16 @@ Publish the file the gate checked, never the working tree: `npm pack --dry-run` 
 - GitHub releases: `gh release create|upload` is denied when an attached `.tgz`/`.tar.gz` fails the gate (a tarball without a root `package.json` gets the leak rules only), and when an attached archive shipsafe cannot read yet (`.jar`, `.7z`, ...); `.zip` and `.vsix` assets are scanned. Other assets such as binaries and checksums pass unscanned.
 - npm packages and static sites only for now. PyPI and crates.io are planned.
 
+## Related tools
+
+These check different things or a different file set; run them alongside shipsafe rather than instead of it.
+
+- [publint](https://publint.dev) and [@arethetypeswrong/cli](https://github.com/arethetypeswrong/arethetypeswrong.github.io) check that a package is well formed: `exports` shapes, module formats, type resolution. shipsafe only checks that entry points exist, and otherwise asks a different question: whether the tarball carries things that should never ship.
+- [secretlint](https://github.com/secretlint/secretlint) has a much larger secret rule set and scans the files you point it at. shipsafe's `secret-token` rule covers a short list of high-confidence token formats, but it reads the packed tarball, so it sees exactly what reaches the registry and nothing that stays behind.
+- [gitleaks](https://github.com/gitleaks/gitleaks) and [trufflehog](https://github.com/trufflesecurity/trufflehog) scan git history and repositories. A secret in history never ships in a tarball that excludes it, and a secret generated at build time ships without ever touching git; each tool answers for its own file set.
+
+What shipsafe adds is the tarball-native view (maps, `sourcesContent`, source and test paths, install scripts, archive integrity on the exact file that is published) and the Claude Code hook that re-checks that file at publish time.
+
 ## License
 
 MIT

@@ -143,6 +143,36 @@
               "hook"
             ],
             "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*nuget*push*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*gem*push*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*mvn*deploy-file*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
           }
         ]
       }

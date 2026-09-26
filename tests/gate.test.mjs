@@ -514,8 +514,8 @@ test('gh release create and upload gate attached tarballs', () => {
   assert.match(hook(`gh release upload v1 ${leaky} --clobber`).permissionDecisionReason, /source-map/);
   assert.match(hook('gh release upload v1 *.tar.gz', rel).permissionDecisionReason, /source-map/);
   assert.match(hook('gh release create v1 app.zip', rel).permissionDecisionReason, /could not check .*app\.zip/);
-  writeFileSync(join(rel, 'app.jar'), 'PK\n');
-  assert.match(hook('gh release create v1 app.jar', rel).permissionDecisionReason, /cannot scan yet/);
+  writeFileSync(join(rel, 'app.7z'), '7z\n');
+  assert.match(hook('gh release create v1 app.7z', rel).permissionDecisionReason, /cannot scan yet/);
   assert.equal(hook('gh release create v1 --generate-notes', rel), null);
   assert.equal(hook('gh release view v1', rel), null);
 });
@@ -625,4 +625,35 @@ test('eas update must publish a checked prebuilt export', () => {
   assert.equal(hook('eas update --skip-bundler --input-dir export-clean --branch main', app), null);
   assert.equal(hook('eas update:list', app), null);
   assert.equal(hook('eas build --platform ios', app), null);
+});
+
+test('NuGet, RubyGems and Maven uploads are gated on the named file', () => {
+  const nu = zipDir('Probe.1.0.0.nupkg', { 'Probe.nuspec': '<package/>', '[Content_Types].xml': '<Types/>', 'lib/net8.0/Probe.dll': 'MZ', 'src/Probe.cs': 'class P {}', 'appsettings.Production.json': `{"k":"${'AK' + 'IA' + 'A'.repeat(16)}"}` });
+  const r = check(nu);
+  assert.equal(r.code, 1);
+  assert.equal(r.report.kind, 'nupkg');
+  assert.deepEqual(rules(r.report), ['secret-token']);
+  assert.match(r.report.warnings.join('\n'), /src\/ directory/);
+  const cleanNu = zipDir('Clean.1.0.0.nupkg', { 'Clean.nuspec': '<package/>', 'lib/net8.0/Clean.dll': 'MZ' });
+  assert.equal(check(cleanNu).code, 0);
+  const gemSrc = join(root, 'gem-src');
+  mkdirSync(join(gemSrc, 'data/lib'), { recursive: true });
+  writeFileSync(join(gemSrc, 'data/lib/probe.rb'), 'module Probe; end\n');
+  writeFileSync(join(gemSrc, 'data/.env'), 'SECRET=1\n');
+  execFileSync('tar', ['-czf', join(gemSrc, 'data.tar.gz'), '-C', join(gemSrc, 'data'), '.']);
+  writeFileSync(join(gemSrc, 'metadata'), '--- !ruby/object:Gem::Specification\nname: probe\n');
+  execFileSync('gzip', ['-f', join(gemSrc, 'metadata')]);
+  const gem = join(root, 'probe-1.0.0.gem');
+  execFileSync('tar', ['-cf', gem, '-C', gemSrc, 'metadata.gz', 'data.tar.gz']);
+  const g = check(gem);
+  assert.equal(g.code, 1);
+  assert.equal(g.report.kind, 'gem');
+  assert.deepEqual(g.report.findings.map((f) => [f.rule, f.path]), [['sensitive-file', '.env']]);
+  assert.match(hook(`dotnet nuget push ${nu} --source https://api.nuget.org/v3/index.json --api-key KEY`).permissionDecisionReason, /secret-token/);
+  assert.equal(hook(`dotnet nuget push ${cleanNu} -s https://api.nuget.org/v3/index.json`), null);
+  assert.match(hook(`gem push ${gem}`).permissionDecisionReason, /sensitive-file/);
+  assert.match(hook('gem push').permissionDecisionReason, /names no gem/);
+  assert.match(hook(`mvn deploy:deploy-file -Dfile=${nu} -DrepositoryId=x -Durl=https://repo.example`).permissionDecisionReason, /secret-token/);
+  assert.equal(hook('mvn deploy'), null);
+  assert.equal(hook('dotnet build'), null);
 });

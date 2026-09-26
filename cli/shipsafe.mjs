@@ -478,7 +478,12 @@ function openTarball(file) {
       ? all.filter((e) => e.path.startsWith('extension/')).map((e) => ({ ...e, rel: e.path.slice(10) })).filter((e) => e.rel)
       : all.map((e) => ({ ...e, rel: e.path.replace(/\/$/, '') })), notes);
     const files = entries.filter((e) => e.type === '0').map((e) => ({ path: e.rel, size: e.size, data: e.data }));
-    const kind = vsix ? 'vsix' : names.has('manifest.json') ? 'webext' : 'generic';
+    const nupkg = [...names].some((n) => !n.includes('/') && n.endsWith('.nuspec'));
+    const kind = vsix ? 'vsix' : nupkg ? 'nupkg' : names.has('META-INF/MANIFEST.MF') ? 'jar' : names.has('manifest.json') ? 'webext' : 'generic';
+    const symbols = !Buffer.isBuffer(file) && /\.(snupkg|symbols\.nupkg)$/i.test(file);
+    if (nupkg && !symbols && [...names].some((n) => n.startsWith('src/'))) {
+      notes.push('the package carries a src/ directory; that is normal only for a symbols package (.snupkg), check that sources were meant to ship');
+    }
     return { raw, entries, files, kind, format: 'zip', notes };
   }
   let tar;
@@ -488,7 +493,20 @@ function openTarball(file) {
     if (e.code === 'ERR_BUFFER_TOO_LARGE' || e instanceof RangeError) throw new GuardError(`${file} unpacks to more than ${MAX_UNPACKED_BYTES} bytes; refusing to scan it`);
     throw new GuardError(`cannot gunzip ${file}: ${e.message}`);
   }
-  const entries = readTar(tar).map((e) => ({ ...e, rel: stripRoot(e.path) }));
+  const outer = readTar(tar);
+  if (outer.some((e) => e.path === 'data.tar.gz') && outer.some((e) => e.path === 'metadata.gz')) {
+    const data = outer.find((e) => e.path === 'data.tar.gz');
+    let inner;
+    try {
+      inner = gunzipSync(data.data, { maxOutputLength: MAX_UNPACKED_BYTES });
+    } catch (e) {
+      throw new GuardError(`cannot gunzip the gem's data.tar.gz: ${e.message}`);
+    }
+    const entries = readTar(inner).map((e) => ({ ...e, rel: e.path.replace(/^\.\//, '') }));
+    const files = entries.filter((e) => e.type === '0' || e.type === '7').map((e) => ({ path: e.rel, size: e.size, data: e.data }));
+    return { raw, entries, files, kind: 'gem', format: 'gem' };
+  }
+  const entries = outer.map((e) => ({ ...e, rel: stripRoot(e.path) }));
   if (!entries.length) throw new GuardError('the tarball is empty');
   const files = entries
     .filter((e) => e.type === '0' || e.type === '7')
@@ -501,6 +519,9 @@ const KIND_RULES = {
   webext: new Set([...DIR_RULES, 'typescript-source', 'source-dir', 'test-path', 'file-size']),
   asar: new Set([...DIR_RULES, 'typescript-source', 'test-path']),
   generic: DIR_RULES,
+  nupkg: DIR_RULES,
+  jar: DIR_RULES,
+  gem: DIR_RULES,
 };
 const BROAD_HOSTS = new Set(['<all_urls>', '*://*/*', 'http://*/*', 'https://*/*', '*://*/', 'http://*/', 'https://*/']);
 
@@ -576,7 +597,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
     version: VERSION,
     file: label ?? resolve(file),
     kind,
-    package: kind === 'asar' ? 'Electron asar archive' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
+    package: kind === 'asar' ? 'Electron asar archive' : kind === 'nupkg' ? 'NuGet package' : kind === 'jar' ? 'Java archive' : kind === 'gem' ? 'Ruby gem' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
     manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
     files: files.length,
@@ -1042,15 +1063,18 @@ function findDeploy(prog, args, cwd) {
   return null;
 }
 const GH_VALUE_OPTS = new Set(['-t', '--title', '-n', '--notes', '-F', '--notes-file', '--target', '--discussion-category', '-R', '--repo', '--notes-start-tag', '--notes-from-tag']);
-const SCANNABLE_ASSET = /\.(tgz|tar\.gz|zip|vsix|asar)$/i;
+const SCANNABLE_ASSET = /\.(tgz|tar\.gz|zip|vsix|asar|nupkg|snupkg|jar|gem)$/i;
 
 function findReleaseAssets(args, cwd) {
   const pos = deployPositionals(args, GH_VALUE_OPTS);
   if (pos[0] !== 'release' || !['create', 'upload'].includes(pos[1])) return null;
+  return expandAssets(pos.slice(3).map((a) => a.replace(/#[^/]*$/, '')), cwd);
+}
+
+function expandAssets(args, cwd) {
   const assets = [];
-  for (const raw of pos.slice(3)) {
-    const arg = raw.replace(/#[^/]*$/, '');
-    if (/[$`]/.test(arg)) return { error: `release asset "${arg}" uses shell expansion; name each asset literally` };
+  for (const arg of args) {
+    if (/[$`]/.test(arg)) return { error: `upload path "${arg}" uses shell expansion; name each file literally` };
     const full = expandPath(arg, cwd);
     if (/[*?]/.test(basename(full))) {
       const dir = dirname(full);
@@ -1061,6 +1085,21 @@ function findReleaseAssets(args, cwd) {
     }
   }
   return assets.length ? { assets } : null;
+}
+
+const PUSH_VALUE_OPTS = new Set(['-s', '--source', '-k', '--api-key', '--symbol-source', '--symbol-api-key', '-t', '--timeout', '--host', '--otp', '--key',
+  '-Source', '-ApiKey', '-SymbolSource', '-SymbolApiKey', '-Timeout', '-ConfigFile', '--configfile']);
+
+function findPackageUpload(prog, args, cwd) {
+  const pos = deployPositionals(args, PUSH_VALUE_OPTS);
+  if (prog === 'dotnet' && pos[0] === 'nuget' && pos[1] === 'push') return pos[2] ? { manager: 'dotnet nuget push', ...expandAssets([pos[2]], cwd) } : { manager: 'dotnet nuget push', error: '`dotnet nuget push` names no package; name the checked .nupkg.' };
+  if (prog === 'nuget' && pos[0] === 'push') return pos[1] ? { manager: 'nuget push', ...expandAssets([pos[1]], cwd) } : { manager: 'nuget push', error: '`nuget push` names no package; name the checked .nupkg.' };
+  if (prog === 'gem' && pos[0] === 'push') return pos[1] ? { manager: 'gem push', ...expandAssets([pos[1]], cwd) } : { manager: 'gem push', error: '`gem push` names no gem; name the checked .gem.' };
+  if ((prog === 'mvn' || prog === 'mvnw') && args.some((a) => /(^|:)deploy-file$/.test(a))) {
+    const f = args.find((a) => a.startsWith('-Dfile='));
+    return f ? { manager: 'mvn deploy:deploy-file', ...expandAssets([f.slice(7)], cwd) } : null;
+  }
+  return null;
 }
 
 const ORCHESTRATORS = new Set(['lerna', 'changeset', 'semantic-release', 'release-it', 'np']);
@@ -1136,6 +1175,11 @@ function scanSegment(seg, cwd, ctx) {
   }
   if (RUNNERS.has(prog)) {
     nested(stripRunnerOpts(t.slice(1), { ...ctx, cwd, depth: ctx.depth + 1 }));
+    return cwd;
+  }
+  if (['dotnet', 'nuget', 'gem', 'mvn', 'mvnw'].includes(prog)) {
+    const r = findPackageUpload(prog, t.slice(1), cwd);
+    if (r && (r.assets || r.error)) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed, release: true });
     return cwd;
   }
   if (prog === 'gh') {
@@ -1217,7 +1261,7 @@ function evaluateRelease(p) {
     } catch (e) {
       return `shipsafe could not check ${file}: ${e.message}`;
     }
-    if (!r.pass) return `shipsafe check failed for release asset ${file}:\n${formatReport(r)}`;
+    if (!r.pass) return `shipsafe check failed for ${p.manager === 'gh release' ? 'release asset' : 'upload'} ${file}:\n${formatReport(r)}`;
   }
   return null;
 }
@@ -1293,7 +1337,7 @@ const USAGE = `shipsafe ${VERSION}
 
 Usage:
   shipsafe check <file.tgz>... [--json | --format text|json|sarif|markdown]
-                                       scan npm tarballs, .vsix, .asar and extension .zip; exit 1 on any finding, 2 on any error
+                                       scan npm, .vsix, .asar, .nupkg, .jar, .gem and extension .zip; exit 1 on any finding, 2 on any error
   shipsafe check-dir <dir>... [--json | --format ...]
                                        scan a static build output (maps, sourcesContent, credentials, secrets, buckets)
   shipsafe verify <file.tgz> [--registry <url>] [--json]

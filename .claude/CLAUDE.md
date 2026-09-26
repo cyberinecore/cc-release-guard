@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - All tests: `npm test` (runs `node --test tests/*.test.mjs`; `node --test tests/` fails because Node treats the dir as a module).
 - One test: `node --test --test-name-pattern "inline and remote" tests/gate.test.mjs`
 - Gate a tarball: `node cli/shipsafe.mjs check <file.tgz> [--json]` (exit 0 pass, 1 findings, 2 usage/config error).
-- Dogfood the CLI package: `cd cli && npm pack --pack-destination /tmp && node shipsafe.mjs check /tmp/shipsafe-<version>.tgz` must PASS.
+- Dogfood the CLI package: `cd cli && npm pack --pack-destination /tmp && node shipsafe.mjs check /tmp/cyberinecore-shipsafe-<version>.tgz` must PASS.
 - Validate the plugin: `claude plugin validate . --strict` and `claude plugin validate .claude-plugin/plugin.json --strict` (neither parses skill frontmatter). This file sits in `.claude/` because a root `CLAUDE.md` makes the strict plugin validation fail.
 - Live hook check: `echo "<prompt>" | claude -p --model haiku --plugin-dir . --allowedTools "Bash(npm publish *)"` from a temp dir holding a `"private": true` package and `--registry http://127.0.0.1:9`, so a hook failure still cannot publish. Pass the prompt on stdin: `--allowedTools` is variadic and swallows a positional prompt.
 
@@ -28,6 +28,7 @@ The repo root is simultaneously the plugin root and a single-plugin marketplace 
 
 Key design decisions (do not reverse without the user):
 
+- Naming: brand, plugin and marketplace are `shipsafe`; the npm package is `@cyberinecore/shipsafe` (bin `shipsafe`). Every executable reference (npm scope, GitHub repo, marketplace, Action) uses the one handle `cyberinecore`, because the GitHub name `cyberine` belongs to someone else and a `@cyberine` npm scope would invite users to guess `github.com/cyberine/...`. Docs always spell out full install commands.
 - No receipts/hash cache: the hook re-scans the exact tarball at publish time, so nothing can be forged or go stale.
 - Config lives in the PACKED `package.json` under `shipsafe` (`maxFileBytes`, `allow[]` with mandatory `reason`), so CI and the hook judge the same artifact identically. There are deliberately no CLI flags that change rules.
 - `yarn npm publish` is always denied (it cannot publish a prebuilt tarball); `--dry-run` publishes pass; a publish with no `.tgz` argument is denied.

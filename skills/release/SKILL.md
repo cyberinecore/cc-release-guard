@@ -77,6 +77,6 @@ Run the same gate before any publish step, on the same file the publish step upl
 
 ```sh
 npm pack --pack-destination out
-npx --yes shipsafe@0.1.0 check out/*.tgz
+npx --yes @cyberinecore/shipsafe@0.1.0 check out/*.tgz
 npm publish out/*.tgz --provenance --access public
 ```

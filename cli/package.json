@@ -1,5 +1,5 @@
 {
-  "name": "shipsafe",
+  "name": "@cyberinecore/shipsafe",
   "version": "0.1.0",
   "description": "Deterministic npm tarball gate: fails a packed .tgz that ships source maps, embedded sources, TypeScript sources, src/ or test paths, oversized files, or storage-bucket URLs.",
   "type": "module",
@@ -29,5 +29,8 @@
   },
   "bugs": {
     "url": "https://github.com/cyberinecore/cc-release-guard/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

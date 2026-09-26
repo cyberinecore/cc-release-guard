@@ -47,13 +47,15 @@ claude plugin marketplace add cyberinecore/cc-release-guard
 claude plugin install shipsafe@shipsafe
 ```
 
+Official sources are only `github.com/cyberinecore/cc-release-guard` and the npm package `@cyberinecore/shipsafe`; anything under another owner is not this project.
+
 The hook needs `node` on `PATH`. If `node` is missing, the hook errors without blocking.
 
 ## Use in CI
 
 ```sh
 npm pack --pack-destination out
-npx --yes shipsafe@0.1.0 check out/*.tgz
+npx --yes @cyberinecore/shipsafe@0.1.0 check out/*.tgz
 npm publish out/*.tgz --access public
 ```
 

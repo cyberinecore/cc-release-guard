@@ -6,15 +6,15 @@ Project facts about CI/CD, filled by hand: read the repo's CI config and record 
 ## Platform
 <!-- nf:section platform -->
 
-- Platform: (unknown)
-- Config: (path to the CI config)
+- Platform: GitHub Actions
+- Config: `.github/workflows/ci.yml` (`npm test` plus the cli/ dogfood check on Node 18, 20 and 22, on every push and pull request)
 
 ## Deploy triggers
 <!-- nf:section deploy-triggers -->
 
 Which push lands where.
 
-- (branch) -> (environment)
+- None: no push deploys anything. npm publishing stays a manual step.
 
 ## Skip CI
 <!-- nf:section skip-ci -->

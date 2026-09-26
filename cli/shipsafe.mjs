@@ -8,6 +8,7 @@ import { gunzipSync } from 'node:zlib';
 
 const VERSION = '0.1.0';
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
 const MAX_UNPACKED_BYTES = 1024 * 1024 * 1024;
 const MANAGERS = new Set(['npm', 'pnpm', 'bun', 'yarn']);
 const WRAPPERS = new Set(['time', 'nice', 'nohup', 'command', 'builtin', 'noglob', 'exec', 'sudo']);
@@ -34,6 +35,7 @@ const RULES = {
   'sensitive-file': 'credential or VCS file',
   'file-size': 'file over the size threshold',
   'bucket-url': 'URL to a storage bucket',
+  'lifecycle-script': 'install script that runs on every consumer machine',
   'archive-integrity': 'link, device or duplicate entry the scan cannot vouch for',
 };
 
@@ -168,7 +170,8 @@ function loadConfig(files) {
     if (typeof a.reason !== 'string' || a.reason.trim().length < 10) throw new GuardError(`shipsafe.allow[${i}].reason must explain the exception (10+ chars)`);
     return { ...a, re: globToRegex(a.path), used: false };
   });
-  return { name: json.name, version: json.version, maxFileBytes, allow };
+  const scripts = json.scripts && typeof json.scripts === 'object' ? json.scripts : {};
+  return { name: json.name, version: json.version, maxFileBytes, allow, scripts };
 }
 
 function scanPath(path) {
@@ -243,6 +246,12 @@ export function checkTarball(file) {
     }
   };
   for (const [path, detail] of integrity) record(path, [['archive-integrity', detail]]);
+  for (const name of INSTALL_SCRIPTS) {
+    if (typeof config.scripts[name] === 'string') record(`package.json#${name}`, [['lifecycle-script', config.scripts[name].slice(0, 120)]]);
+  }
+  if (!config.scripts.install && !config.scripts.preinstall && files.some((f) => f.path === 'binding.gyp')) {
+    record('package.json#install', [['lifecycle-script', 'implicit `node-gyp rebuild` because binding.gyp ships']]);
+  }
   let unpackedBytes = 0;
   for (const f of files) {
     unpackedBytes += f.size;
@@ -276,6 +285,8 @@ function formatReport(r) {
   if (blocking.length) {
     const rules = [...new Set(blocking.map((f) => f.rule))].map((k) => `${k} = ${RULES[k]}`);
     lines.push(`FAIL  ${blocking.length} finding(s). ${rules.join('; ')}`);
+    const script = blocking.find((f) => f.rule === 'lifecycle-script');
+    if (script) lines.push(`HINT  a native addon build such as \`node-gyp rebuild\` is a legitimate install script; allow it in the packed package.json with "shipsafe": { "allow": [{ "rule": "lifecycle-script", "path": "${script.path}", "reason": "<why consumers must run it>" }] }`);
   } else {
     lines.push(`PASS  publish exactly this file: npm publish ${r.file}`);
   }

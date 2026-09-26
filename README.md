@@ -24,6 +24,7 @@ What it does not do: make JavaScript unreversable. Minified JS, and the JS embed
 | `sensitive-file` | `.env*` (except `.env.example`), `.npmrc`, `*.pem`, `*.key`, `id_rsa*`, `.git/` |
 | `file-size` | a file larger than `maxFileBytes` (default 5 MiB) |
 | `bucket-url` | S3, R2, GCS, Azure Blob, DigitalOcean Spaces, Backblaze B2 or Wasabi hostnames and `s3://` / `gs://` URLs |
+| `lifecycle-script` | a `preinstall`, `install` or `postinstall` script in the packed `package.json`, or a shipped `binding.gyp` (npm then runs `node-gyp rebuild` on install); allow one with `"path": "package.json#<script>"` |
 | `archive-integrity` | symlink, hardlink, device or FIFO entries and duplicate paths, which the scan cannot vouch for |
 
 A tarball that is truncated, malformed, has an entry escaping the package root (`..` or an absolute path), or unpacks to more than 1 GiB is a hard error (exit 2), not a finding.

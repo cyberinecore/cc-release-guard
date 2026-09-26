@@ -209,3 +209,21 @@ test('hand-built hostile tarballs: traversal, absolute paths, truncation and ove
   }
   assert.equal(check(good).code, 0);
 });
+
+test('install lifecycle scripts fail unless allowed per script with a reason', () => {
+  const scripts = { postinstall: 'node setup.js', prepare: 'node -e 0', prepublishOnly: 'node -e 0' };
+  const blocked = check(pack('lifecycle', { 'index.js': 'x\n' }, { scripts }));
+  assert.equal(blocked.code, 1);
+  assert.deepEqual(rules(blocked.report), ['lifecycle-script']);
+  assert.deepEqual(blocked.report.findings.map((f) => f.path), ['package.json#postinstall']);
+  const text = spawnSync('node', [CLI, 'check', pack('lifecycle-text', { 'index.js': 'x\n' }, { scripts })], { encoding: 'utf8' }).stdout;
+  assert.match(text, /HINT .*node-gyp rebuild.*package\.json#postinstall/);
+  const allowed = check(pack('lifecycle-allowed', { 'index.js': 'x\n' }, {
+    scripts,
+    shipsafe: { allow: [{ rule: 'lifecycle-script', path: 'package.json#postinstall', reason: 'downloads the platform binary' }] },
+  }));
+  assert.equal(allowed.code, 0);
+  const gyp = check(pack('lifecycle-gyp', { 'index.js': 'x\n', 'binding.gyp': '{}\n' }));
+  assert.equal(gyp.code, 1);
+  assert.match(gyp.report.findings[0].detail, /binding\.gyp/);
+});

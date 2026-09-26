@@ -77,6 +77,18 @@ for f in out/*.tgz; do npx --yes @cyberinecore/shipsafe@0.1.0 verify "$f"; done
 
 For a workspace, pack every package into `out/` (`npm pack --workspaces --pack-destination out`); `check` gates them all in one run and fails if any one fails.
 
+Or use the composite action from this repository, which runs the CLI from its own checkout (no npm install) and writes a markdown report to the job summary:
+
+```yaml
+- uses: cyberinecore/cc-release-guard@main
+  id: shipsafe
+  with:
+    working-directory: .
+- run: for f in ${{ steps.shipsafe.outputs.tarballs }}; do npm publish "$f" --access public; done
+```
+
+Inputs: `tarballs` (a glob such as `out/*.tgz`; empty packs `working-directory` with `npm pack`), `working-directory`, `summary` (`true`/`false`). Output `tarballs` lists the absolute paths that passed, so the publish step uploads exactly those files. Pin a commit SHA instead of `@main` until a versioned tag exists.
+
 To see the result in review, append `--format markdown` output to `$GITHUB_STEP_SUMMARY` and upload `--format sarif` output with `github/codeql-action/upload-sarif` (needs `security-events: write`); this repo's `.github/workflows/ci.yml` does both.
 
 Publish the file the gate checked, never the working tree: `npm pack --dry-run` does not run `prepublishOnly`, so it can list a different file set from the one that ships.

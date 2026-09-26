@@ -48,3 +48,18 @@ jobs:
         with:
           sarif_file: out/shipsafe.sarif
           category: shipsafe
+
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: packed
+        uses: ./
+        with:
+          working-directory: cli
+      - run: test -n "${{ steps.packed.outputs.tarballs }}"
+      - run: mkdir -p out && (cd cli && npm pack --pack-destination ../out)
+      - uses: ./
+        with:
+          tarballs: out/*.tgz
+          summary: 'false'

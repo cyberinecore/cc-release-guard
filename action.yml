@@ -1,0 +1,52 @@
+name: shipsafe
+description: Gate packed npm tarballs, .vsix and extension zips for source maps, sources, secrets and other accidental leaks before publishing.
+author: Nia D Pham
+branding:
+  icon: shield
+  color: green
+inputs:
+  tarballs:
+    description: Files to check, as a shell glob (for example out/*.tgz). Empty packs working-directory with npm pack first.
+    required: false
+    default: ''
+  working-directory:
+    description: Package directory to pack when tarballs is empty.
+    required: false
+    default: '.'
+  summary:
+    description: Write a markdown report to the job summary (true or false).
+    required: false
+    default: 'true'
+outputs:
+  tarballs:
+    description: Space-separated absolute paths of the checked files; publish exactly these.
+    value: ${{ steps.gate.outputs.tarballs }}
+runs:
+  using: composite
+  steps:
+    - id: gate
+      shell: bash
+      env:
+        SHIPSAFE_CLI: ${{ github.action_path }}/cli/shipsafe.mjs
+        INPUT_TARBALLS: ${{ inputs.tarballs }}
+        INPUT_WORKDIR: ${{ inputs.working-directory }}
+        INPUT_SUMMARY: ${{ inputs.summary }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        if [ -z "$INPUT_TARBALLS" ]; then
+          out="$RUNNER_TEMP/shipsafe-pack"
+          mkdir -p "$out"
+          (cd "$INPUT_WORKDIR" && npm pack --pack-destination "$out" >/dev/null)
+          files=("$out"/*.tgz)
+        else
+          read -r -a patterns <<< "$INPUT_TARBALLS"
+          files=()
+          for p in "${patterns[@]}"; do files+=($p); done
+        fi
+        if [ ${#files[@]} -eq 0 ]; then echo "shipsafe: no files matched" >&2; exit 2; fi
+        abs=()
+        for f in "${files[@]}"; do abs+=("$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"); done
+        echo "tarballs=${abs[*]}" >> "$GITHUB_OUTPUT"
+        if [ "$INPUT_SUMMARY" = "true" ]; then node "$SHIPSAFE_CLI" check "${abs[@]}" --format markdown >> "$GITHUB_STEP_SUMMARY" || true; fi
+        node "$SHIPSAFE_CLI" check "${abs[@]}"

@@ -85,3 +85,36 @@ for f in out/*.tgz; do npx --yes @cyberinecore/shipsafe@0.1.0 verify "$f"; done
 ```
 
 CI publishes never pass through the hook, so `verify` on the same file is the CI's proof that the reviewed artifact is the published one.
+
+## CI with trusted publishing (OIDC)
+
+Template checked on 2026-09-27 against https://docs.npmjs.com/trusted-publishers/, which states: trusted publishing needs npm CLI 11.5.1 or later and Node 22.14.0 or higher, the workflow needs `id-token: write`, and provenance is generated automatically. Re-check that page before using this template; it drifts. No token exists anywhere in this flow, so there is nothing for the skill to handle.
+
+First the user links the package to the repository and workflow file on npmjs.com (package settings, Trusted Publisher). That step is theirs; guide them there, never do it for them.
+
+```yaml
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@^11.5.1
+      - run: npm ci
+      - run: npm pack --pack-destination out
+      - run: npx --yes @cyberinecore/shipsafe@0.1.0 check out/*.tgz
+      - run: for f in out/*.tgz; do npm publish "$f" --access public; done
+      - run: for f in out/*.tgz; do npx --yes @cyberinecore/shipsafe@0.1.0 verify "$f"; done
+```
+
+Pack once, gate that file, publish that same file, verify that same file: the checked artifact and the published artifact are one file. The npm page shows `npm publish` from the project directory and does not say whether publishing a prebuilt `.tgz` path works under trusted publishing; this is unconfirmed, so the first run of this template should publish a throwaway prerelease (with `--tag next`) before the workflow is trusted for real releases.

@@ -24,7 +24,7 @@ The repo root is simultaneously the plugin root and a single-plugin marketplace 
 `cli/shipsafe.mjs` is the single source of truth for both consumers:
 
 - `check` mode is what CI and humans run.
-- `hook` mode is what `hooks/hooks.json` runs (exec form: `node ${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs hook`). It reads the PreToolUse JSON on stdin, finds publish invocations in the Bash command, and re-runs the same `checkTarball()` on the named `.tgz`. It only ever emits `deny` or nothing; it never returns `allow`, so normal permission prompts still apply to a clean publish.
+- `hook` mode is what `hooks/hooks.json` runs (exec form: `node ${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs hook`). It reads the PreToolUse JSON on stdin, finds publish invocations in the Bash command, and re-runs the same `checkTarball()` on the named `.tgz`. It only ever emits `ask` or nothing: it never blocks (user decision 2026-09-27: the plugin suggests, the user decides) and never returns `allow`, so normal permission prompts still apply to a clean publish.
 
 Key design decisions (do not reverse without the user):
 
@@ -32,9 +32,9 @@ Key design decisions (do not reverse without the user):
 - No receipts/hash cache: the hook re-scans the exact tarball at publish time, so nothing can be forged or go stale.
 - `check-dir` (static-site output) reads config from the nearest `package.json` at or above the directory, not from a file inside it, so nothing extra deploys to the CDN. It applies only the leak rules in `DIR_RULES`.
 - Config lives in the PACKED `package.json` under `shipsafe` (`maxFileBytes`, `allow[]` with mandatory `reason`), so CI and the hook judge the same artifact identically. There are deliberately no CLI flags that change rules.
-- `yarn npm publish` is always denied (it cannot publish a prebuilt tarball); `--dry-run` publishes pass; a publish with no `.tgz` argument is denied.
+- `yarn npm publish` always triggers an ask (it cannot publish a prebuilt tarball); `--dry-run` publishes pass; a publish with no `.tgz` argument triggers an ask.
 - Content rules are written so the gate's own source does not trip them (`sourcesContent` must be followed by `:`; inline maps need `data:<letter>`). Keep that property when adding rules, or the dogfood check fails.
-- The `if` filters in `hooks/hooks.json` (`Bash(*publish*)`, plus `semantic-release`, `release-it` and `np` shapes, which carry no `publish` word) only limit when the hook spawns; exact detection happens in `findPublishes()` (shell-ish tokenizer, `cd` tracking, wrapper/env stripping, value-taking option skipping, recursion into `sh|bash|zsh -c`, `eval`, package runners `npx`/`bunx`/`corepack`/`<pm> exec|dlx|x`, and `xargs`/`find -exec`, whose tarball is unknowable and so always denied). A leading `*` is required: `Bash(npm*publish*)` never spawns for `npx npm publish`. Claude Code's `if` matching is best-effort, and publishes hidden in `npm run <script>` are out of reach by design.
+- The `if` filters in `hooks/hooks.json` (`Bash(*publish*)`, plus `semantic-release`, `release-it` and `np` shapes, which carry no `publish` word) only limit when the hook spawns; exact detection happens in `findPublishes()` (shell-ish tokenizer, `cd` tracking, wrapper/env stripping, value-taking option skipping, recursion into `sh|bash|zsh -c`, `eval`, package runners `npx`/`bunx`/`corepack`/`<pm> exec|dlx|x`, and `xargs`/`find -exec`, whose tarball is unknowable and so always asked about). A leading `*` is required: `Bash(npm*publish*)` never spawns for `npx npm publish`. Claude Code's `if` matching is best-effort, and publishes hidden in `npm run <script>` are out of reach by design.
 
 Archive parsing is hand-written to stay zero-dependency: tar (gzip via `node:zlib`, ustar + pax + GNU longname; entries rooted by stripping the first path segment, `package/`) and zip (central directory, stored + deflate via `inflateRawSync`; `.vsix` rooted at `extension/`). `openTarball()` returns a `kind` (`npm`, `vsix`, `webext`, `generic`) and `KIND_RULES` limits which rules apply to each. The zip reader is meant to be reused for PyPI wheels.
 

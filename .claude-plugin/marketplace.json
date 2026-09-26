@@ -9,7 +9,7 @@
     {
       "name": "shipsafe",
       "source": "./",
-      "description": "Tarball gate, publish-blocking hook and release skills for npm packages."
+      "description": "Tarball gate, ask-before-publish hook and release skills for npm packages."
     }
   ]
 }

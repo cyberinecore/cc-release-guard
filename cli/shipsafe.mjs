@@ -1411,8 +1411,8 @@ function runHook() {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      permissionDecisionReason: `shipsafe blocked this publish or deploy.\n${reasons.join('\n')}`,
+      permissionDecision: 'ask',
+      permissionDecisionReason: `shipsafe: this publish or deploy may ship something it should not. Review before allowing it.\n${reasons.join('\n')}`,
     },
   }));
   return 0;
@@ -1431,7 +1431,7 @@ Usage:
                                        list added, removed and grown files and label risk-raising changes (default: against latest)
   shipsafe audit <name> [--versions <n>] [--registry <url>] [--json]
                                        incident tool: download and gate the last n published versions (default 5)
-  shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin)
+  shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin; asks the user, never blocks)
   shipsafe --version
 
 Rules: ${Object.keys(RULES).join(', ')}

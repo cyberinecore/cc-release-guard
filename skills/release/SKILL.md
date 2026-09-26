@@ -69,7 +69,7 @@ Everything above happens before the user fetches an OTP, because a code lasts ab
 
 Keep the `check && publish` form even though the gate just passed: it has not been verified whether the hook fires for commands the user types with `!`, so the line carries its own gate.
 
-The plugin's hook re-runs the gate on that exact file when Claude runs a publish command and blocks `npm publish` / `pnpm publish` / `bun publish` without a passing tarball (also behind `npx`, `corepack`, `bash -c`, `eval`), `yarn npm publish` always (it cannot publish a prebuilt tarball), release orchestrators (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`), a scoped package without an explicit `--access`, and a prerelease headed for the `latest` tag. It does not see publishes hidden inside `npm run <script>` or run outside Claude Code, so CI must run the gate itself.
+The plugin's hook re-runs the gate on that exact file when Claude runs a publish command and, instead of blocking, asks the user before `npm publish` / `pnpm publish` / `bun publish` without a passing tarball (also behind `npx`, `corepack`, `bash -c`, `eval`), `yarn npm publish` always (it cannot publish a prebuilt tarball), release orchestrators (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`), a scoped package without an explicit `--access`, and a prerelease headed for the `latest` tag. It does not see publishes hidden inside `npm run <script>` or run outside Claude Code, so CI must run the gate itself.
 
 ## 5. After publish
 

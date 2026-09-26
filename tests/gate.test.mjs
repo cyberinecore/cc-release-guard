@@ -102,7 +102,7 @@ test('the hook ignores commands that do not publish', () => {
 
 test('the hook denies publishing an unchecked working tree', () => {
   for (const c of ['npm publish', 'npm publish --access public --otp 123456', 'pnpm --filter x publish', 'npm --loglevel warn publish', 'bun publish', 'yarn npm publish', 'FOO=1 timeout 60 npm publish', 'env -u A -u B npm publish', 'npm publish ./pkgdir']) {
-    assert.equal(hook(c)?.permissionDecision, 'deny', c);
+    assert.equal(hook(c)?.permissionDecision, 'ask', c);
   }
 });
 
@@ -115,10 +115,10 @@ test('the hook allows only a tarball that passes the gate', () => {
   assert.equal(hook(`cd ${root} && npm publish ./good-1.0.0.tgz --access public`), null);
   assert.equal(hook(`cd ${root} && pnpm publish good-*.tgz`), null);
   const denied = hook(`npm publish ${leaky}`);
-  assert.equal(denied.permissionDecision, 'deny');
+  assert.equal(denied.permissionDecision, 'ask');
   assert.match(denied.permissionDecisionReason, /source-map/);
-  assert.equal(hook('npm publish missing-9.9.9.tgz')?.permissionDecision, 'deny');
-  assert.equal(hook('npm publish $TGZ')?.permissionDecision, 'deny');
+  assert.equal(hook('npm publish missing-9.9.9.tgz')?.permissionDecision, 'ask');
+  assert.equal(hook('npm publish $TGZ')?.permissionDecision, 'ask');
 });
 
 test('check accepts several tarballs and exits with the worst result', () => {
@@ -140,12 +140,12 @@ test('check accepts several tarballs and exits with the worst result', () => {
 
 test('the hook sees publishes behind runners, shells, eval, xargs and find', () => {
   for (const c of ['npx npm publish', 'npx --yes npm@10 publish', 'bunx npm publish', 'corepack pnpm publish', 'pnpm dlx npm publish', 'pnpm exec npm publish', 'npm exec -- npm publish', 'npm exec -c "npm publish"', 'bash -c "npm publish"', "sh -c 'cd x && npm publish'", 'zsh -lc "npx npm publish"', 'eval npm publish', `ls ${root}/*.tgz | xargs npm publish`, `find ${root} -name 'good-*.tgz' -exec npm publish {} \;`]) {
-    assert.equal(hook(c)?.permissionDecision, 'deny', c);
+    assert.equal(hook(c)?.permissionDecision, 'ask', c);
   }
   assert.match(hook(`ls ${good} | xargs -n1 npm publish`).permissionDecisionReason, /xargs or find/);
   assert.equal(hook(`bash -c "npm publish ${good}"`), null);
   assert.equal(hook(`npx npm@10 publish ${good}`), null);
-  assert.equal(hook(`sh -c 'npm publish ${leaky}'`)?.permissionDecision, 'deny');
+  assert.equal(hook(`sh -c 'npm publish ${leaky}'`)?.permissionDecision, 'ask');
   for (const c of ['npm exec foo', 'npx eslint .', 'bash -c "npm test"', 'ls | xargs rm', 'find . -exec cat {} +']) {
     assert.equal(hook(c), null, c);
   }
@@ -270,13 +270,13 @@ test('entry points in main, types, bin and exports must exist in the tarball', (
 test('release orchestrators are denied with a pack-gate-publish hint; npm stage publish is gated', () => {
   for (const c of ['lerna publish', 'npx lerna publish from-git', 'changeset publish', 'pnpm changeset publish', 'yarn changeset publish', 'npx semantic-release', 'semantic-release --ci', 'release-it', 'np', 'npx np 2.0.0']) {
     const r = hook(c);
-    assert.equal(r?.permissionDecision, 'deny', c);
+    assert.equal(r?.permissionDecision, 'ask', c);
     assert.match(r.permissionDecisionReason, /shipsafe check out\/\*\.tgz/, c);
   }
   for (const c of ['lerna version', 'changeset version', 'semantic-release --dry-run', 'release-it --dry-run', 'np --preview', 'np --no-publish', 'release-it --no-npm', 'lerna publish --help']) {
     assert.equal(hook(c), null, c);
   }
-  assert.equal(hook('npm stage publish')?.permissionDecision, 'deny');
+  assert.equal(hook('npm stage publish')?.permissionDecision, 'ask');
   assert.equal(hook(`npm stage publish ${good}`), null);
   assert.match(hook(`npm stage publish ${leaky}`).permissionDecisionReason, /source-map/);
 });

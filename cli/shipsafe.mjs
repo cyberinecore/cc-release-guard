@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync, inflateRawSync } from 'node:zlib';
@@ -1873,6 +1873,28 @@ function intentProblem(p, m, file) {
   return null;
 }
 
+// DECISION: overlapping hook if-filters are deduplicated by a per-tool_use_id claim file, not by one filterless hook, because Claude Code runs every matching entry in parallel and a filterless hook would spawn node for every Bash command.
+function claimToolUse(id) {
+  if (typeof id !== 'string' || !/^[\w-]{1,200}$/.test(id)) return true;
+  const dir = tmpdir();
+  try {
+    writeFileSync(join(dir, `shipsafe-hook-${id}`), '', { flag: 'wx' });
+  } catch (e) {
+    return e.code !== 'EEXIST';
+  }
+  try {
+    const cutoff = Date.now() - 24 * 3600 * 1000;
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith('shipsafe-hook-')) continue;
+      const p = join(dir, name);
+      if (statSync(p).mtimeMs < cutoff) unlinkSync(p);
+    }
+  } catch {
+    return true;
+  }
+  return true;
+}
+
 function runHook() {
   let input;
   try {
@@ -1881,6 +1903,7 @@ function runHook() {
     return 0;
   }
   if (input?.tool_name !== 'Bash' || typeof input?.tool_input?.command !== 'string') return 0;
+  if (!claimToolUse(input.tool_use_id)) return 0;
   const command = input.tool_input.command;
   let reasons;
   try {
@@ -1992,6 +2015,7 @@ function runCheck(rest, dirMode = false) {
   for (const [i, file] of files.entries()) {
     if (format === 'text' && i > 0) console.log('');
     try {
+      if (!dirMode && existsSync(file) && statSync(file).isDirectory()) throw new GuardError(`${file} is a directory; gate a build output with \`shipsafe check-dir ${file}\`, or pack a package first`);
       const r = dirMode ? checkDirectory(file) : checkTarball(file);
       reports.push(r);
       if (format === 'text') console.log(formatReport(r));

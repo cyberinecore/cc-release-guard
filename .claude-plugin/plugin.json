@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin.json",
   "name": "shipsafe",
   "version": "0.1.0",
-  "description": "Stops accidental source leaks when publishing to npm: a tarball gate, a PreToolUse hook that asks before unchecked publishes, and a skill for the safe build-pack-check-publish procedure.",
+  "description": "Stops accidental source and secret leaks when you publish or deploy: a zero-dependency gate for npm tarballs, wheels, crates, VS Code, Electron, NuGet, gem, Helm and container artifacts, plus a PreToolUse hook that asks before an unchecked publish, upload or deploy, and skills for the safe build-pack-check-publish procedure.",
   "author": {
     "name": "Nia D Pham",
     "email": "xinchao@nghia-pham.com"
@@ -14,8 +14,14 @@
     "npm",
     "publish",
     "release",
+    "deploy",
     "sourcemap",
-    "supply-chain"
+    "secrets",
+    "supply-chain",
+    "pypi",
+    "crates",
+    "helm",
+    "docker"
   ],
   "displayName": "ShipSafe"
 }

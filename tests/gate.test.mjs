@@ -29,9 +29,9 @@ function check(tgz) {
   return { code: r.status, report: r.stdout ? JSON.parse(r.stdout) : null, stderr: r.stderr };
 }
 
-function hook(command, cwd = root) {
+function hook(command, cwd = root, extra = {}) {
   const r = spawnSync('node', [CLI, 'hook'], {
-    input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd, hook_event_name: 'PreToolUse' }),
+    input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd, hook_event_name: 'PreToolUse', ...extra }),
     encoding: 'utf8',
   });
   assert.equal(r.status, 0, r.stderr);
@@ -104,6 +104,13 @@ test('the hook denies publishing an unchecked working tree', () => {
   for (const c of ['npm publish', 'npm publish --access public --otp 123456', 'pnpm --filter x publish', 'npm --loglevel warn publish', 'bun publish', 'yarn npm publish', 'FOO=1 timeout 60 npm publish', 'env -u A -u B npm publish', 'npm publish ./pkgdir']) {
     assert.equal(hook(c)?.permissionDecision, 'ask', c);
   }
+});
+
+test('overlapping hook filters answer once per tool use', () => {
+  const id = `toolu_test_${process.pid}_${Date.now()}`;
+  assert.match(hook('npm publish', root, { tool_use_id: id }).permissionDecisionReason, /without a tarball/);
+  assert.equal(hook('npm publish', root, { tool_use_id: id }), null);
+  assert.match(hook('npm publish', root, { tool_use_id: `${id}_b` }).permissionDecisionReason, /without a tarball/);
 });
 
 test('the hook lets a dry run through', () => {
@@ -493,6 +500,9 @@ test('check-dir and the deploy hook guard static build output', () => {
   assert.match(hook('wrangler pages deploy', site).permissionDecisionReason, /names no output directory/);
   assert.match(hook('wrangler pages deploy missing', site).permissionDecisionReason, /not found/);
   assert.equal(hook('wrangler deploy', site), null);
+  const dirAsFile = spawnSync('node', [CLI, 'check', join(site, 'dist')], { encoding: 'utf8' });
+  assert.equal(dirAsFile.status, 2);
+  assert.match(dirAsFile.stderr, /is a directory; gate a build output with `shipsafe check-dir/);
 });
 
 test('gh release create and upload gate attached tarballs', () => {

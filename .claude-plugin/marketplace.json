@@ -4,12 +4,12 @@
     "name": "Nia D Pham",
     "email": "xinchao@nghia-pham.com"
   },
-  "description": "Release-safety plugins: stop npm packages from shipping source by accident.",
+  "description": "Release-safety plugins: stop packages, archives and deploys from shipping source or secrets by accident.",
   "plugins": [
     {
       "name": "shipsafe",
       "source": "./",
-      "description": "Tarball gate, ask-before-publish hook and release skills for npm packages."
+      "description": "Artifact gate, ask-before-publish hook and release skills for npm, PyPI, crates, Helm, containers and static deploys."
     }
   ]
 }

@@ -312,3 +312,12 @@ test('extra credential files and build artifacts fail under their own rules', ()
   for (const p of artifacts) assert.equal(byPath[p], 'build-artifact', p);
   assert.equal(byPath['dist/data.json'], undefined);
 });
+
+test('unknown config keys and nested archives are warnings, not failures', () => {
+  const r = check(pack('warns', { 'index.js': 'x\n', 'assets/bundle.zip': 'PK\n' }, { shipsafe: { maxFilesBytes: 10, allow: [{ rule: 'bucket-url', path: 'x', reason: 'kept to test warnings', note: 'typo' }] } }));
+  assert.equal(r.code, 0);
+  const text = r.report.warnings.join('\n');
+  assert.match(text, /unknown config key shipsafe\.maxFilesBytes/);
+  assert.match(text, /unknown key shipsafe\.allow\[0\]\.note/);
+  assert.match(text, /nested archive assets\/bundle\.zip was not scanned/);
+});

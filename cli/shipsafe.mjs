@@ -9,6 +9,8 @@ import { gunzipSync } from 'node:zlib';
 const VERSION = '0.1.0';
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
+const CONFIG_KEYS = ['maxFileBytes', 'allow'];
+const NESTED_ARCHIVE = /\.(zip|tgz|tar|tar\.gz|gz|jar|war|vsix|whl|7z|rar|xz|bz2|zst)$/i;
 const MAX_UNPACKED_BYTES = 1024 * 1024 * 1024;
 const MANAGERS = new Set(['npm', 'pnpm', 'bun', 'yarn']);
 const WRAPPERS = new Set(['time', 'nice', 'nohup', 'command', 'builtin', 'noglob', 'exec', 'sudo']);
@@ -176,17 +178,21 @@ function loadConfig(files) {
     throw new GuardError(`package.json is not valid JSON: ${e.message}`);
   }
   const raw = json.shipsafe ?? {};
+  const configWarnings = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new GuardError('shipsafe config in package.json must be an object');
+  for (const k of Object.keys(raw)) if (!CONFIG_KEYS.includes(k)) configWarnings.push(`unknown config key shipsafe.${k} is ignored (known: ${CONFIG_KEYS.join(', ')})`);
   const maxFileBytes = raw.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
   if (!Number.isFinite(maxFileBytes) || maxFileBytes <= 0) throw new GuardError('shipsafe.maxFileBytes must be a positive number');
   const allow = (raw.allow ?? []).map((a, i) => {
     if (!a || !RULES[a.rule]) throw new GuardError(`shipsafe.allow[${i}].rule must be one of: ${Object.keys(RULES).join(', ')}`);
     if (typeof a.path !== 'string' || !a.path) throw new GuardError(`shipsafe.allow[${i}].path is required`);
     if (typeof a.reason !== 'string' || a.reason.trim().length < 10) throw new GuardError(`shipsafe.allow[${i}].reason must explain the exception (10+ chars)`);
+    for (const k of Object.keys(a)) if (!['rule', 'path', 'reason'].includes(k)) configWarnings.push(`unknown key shipsafe.allow[${i}].${k} is ignored`);
     return { ...a, re: globToRegex(a.path), used: false };
   });
   const scripts = json.scripts && typeof json.scripts === 'object' ? json.scripts : {};
   const publishConfig = json.publishConfig && typeof json.publishConfig === 'object' ? json.publishConfig : {};
-  return { name: json.name, version: json.version, private: json.private === true, publishConfig, maxFileBytes, allow, scripts, pkg: json };
+  return { name: json.name, version: json.version, private: json.private === true, publishConfig, maxFileBytes, allow, scripts, pkg: json, warnings: configWarnings };
 }
 
 function isPrerelease(version) {
@@ -296,7 +302,7 @@ export function checkTarball(file) {
     .map((e) => ({ path: stripRoot(e.path), size: e.size, data: e.data }));
   const config = loadConfig(files);
   const findings = [];
-  const warnings = [];
+  const warnings = [...config.warnings];
   const integrity = new Map();
   const note = (path, detail) => { if (!integrity.has(path)) integrity.set(path, detail); };
   for (const e of entries) {
@@ -336,6 +342,7 @@ export function checkTarball(file) {
   for (const f of files) {
     unpackedBytes += f.size;
     const hits = [...scanPath(f.path), ...scanContent(f.data)];
+    if (NESTED_ARCHIVE.test(f.path)) warnings.push(`nested archive ${f.path} was not scanned inside`);
     if (isMetafile(f.path, f.data)) hits.push(['build-artifact', 'esbuild metafile']);
     if (f.size > config.maxFileBytes) hits.push(['file-size', `${f.size} bytes > ${config.maxFileBytes}`]);
     record(f.path, hits);

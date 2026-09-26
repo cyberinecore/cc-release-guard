@@ -46,7 +46,7 @@ Configuration lives in the packed `package.json`, so the CLI in CI and the hook 
 }
 ```
 
-`path` takes `*`, `**` and `?`. Every exception needs a reason, and unused exceptions are reported as warnings.
+`path` takes `*`, `**` and `?`. Every exception needs a reason, and unused exceptions are reported as warnings. Rules about `package.json` itself use `package.json#<field>` as the path, for example `package.json#postinstall`. Unknown keys (a typo such as `maxFilesBytes`) are warnings, and so is any nested archive (`.zip`, `.tgz`, `.jar`, ...), because the gate does not look inside it.
 
 ## Install the plugin
 

@@ -657,3 +657,34 @@ test('NuGet, RubyGems and Maven uploads are gated on the named file', () => {
   assert.equal(hook('mvn deploy'), null);
   assert.equal(hook('dotnet build'), null);
 });
+
+test('docker save images: every layer, deleted files, env and history are scanned', (t) => {
+  if (spawnSync('docker', ['version'], { encoding: 'utf8' }).status !== 0) { t.skip('docker is not available'); return; }
+  if (spawnSync('docker', ['image', 'inspect', 'alpine:3'], { stdio: 'ignore' }).status !== 0 && spawnSync('docker', ['pull', '-q', 'alpine:3'], { stdio: 'ignore' }).status !== 0) { t.skip('alpine:3 is not available'); return; }
+  const ctx = join(root, 'image-ctx');
+  mkdirSync(join(ctx, 'app'), { recursive: true });
+  writeFileSync(join(ctx, 'app/index.js'), 'a()\n');
+  writeFileSync(join(ctx, 'app/.env'), 'SECRET=1\n');
+  const token = 'np' + 'm_' + 'x'.repeat(36);
+  const build = (tag, dockerfile) => {
+    writeFileSync(join(ctx, 'Dockerfile'), dockerfile);
+    const b = spawnSync('docker', ['build', '-q', '-t', tag, ctx], { encoding: 'utf8' });
+    assert.equal(b.status, 0, b.stderr);
+    const out = join(root, `${tag.replace(/[:/]/g, '-')}.tar`);
+    execFileSync('docker', ['save', '-o', out, tag]);
+    execFileSync('docker', ['rmi', '-f', tag], { stdio: 'ignore' });
+    return out;
+  };
+  const leaky = build('shipsafe-probe:leaky', `FROM alpine:3\nCOPY app /app\nRUN rm /app/.env\nENV NPM_TOKEN=${token}\n`);
+  const r = check(leaky);
+  assert.equal(r.code, 1, r.stderr);
+  assert.equal(r.report.kind, 'image');
+  const byRule = r.report.findings.map((f) => `${f.rule} ${f.path}`);
+  const env = r.report.findings.find((f) => /^layer\d+\/app\/\.env$/.test(f.path));
+  assert.equal(env?.rule, 'sensitive-file', byRule.join('\n'));
+  assert.match(env.detail, /deleted in layer\d+ but still readable/);
+  assert.ok(byRule.includes('secret-token config/Env'), byRule.join('\n'));
+  assert.ok(!byRule.some((x) => x.includes('etc/ssl')), 'CA paths are not findings');
+  const clean = build('shipsafe-probe:clean', 'FROM scratch\nCOPY app/index.js /app/index.js\n');
+  assert.equal(check(clean).code, 0);
+});

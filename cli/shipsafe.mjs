@@ -335,7 +335,7 @@ function scanContent(data) {
   const secrets = [];
   for (const [kind, re, keep] of SECRET_PATTERNS) {
     re.lastIndex = 0;
-    for (const m of text.matchAll(re)) secrets.push(`${kind} ${m[0].slice(0, keep)}... (${m[0].length} chars)`);
+    for (const m of text.matchAll(re)) if (!m[0].endsWith('EXAMPLE')) secrets.push(`${kind} ${m[0].slice(0, keep)}... (${m[0].length} chars)`);
   }
   if (secrets.length) found.push(['secret-token', secrets.slice(0, 5).join(', ') + (secrets.length > 5 ? `, +${secrets.length - 5} more` : '')]);
   const hosts = new Map();
@@ -461,6 +461,81 @@ function expandNestedAsar(entries, warnings) {
   return out;
 }
 
+const IMAGE_VENDOR_PATHS = /^(etc\/ssl|etc\/pki|usr\/share|usr\/lib|usr\/local\/lib|lib|usr\/local\/share\/ca-certificates)\/|(^|\/)(node_modules|site-packages|dist-packages|vendor)\//;
+
+function readImage(outer) {
+  const byPath = new Map(outer.map((e) => [e.path.replace(/^\.\//, ''), e]));
+  const json = (path) => {
+    const e = byPath.get(path);
+    if (!e) throw new GuardError(`image archive is missing ${path}`);
+    try {
+      return JSON.parse(e.data.toString('utf8'));
+    } catch (err) {
+      throw new GuardError(`image archive has unreadable ${path}: ${err.message}`);
+    }
+  };
+  let configPath;
+  let layerPaths;
+  if (byPath.has('manifest.json')) {
+    const m = json('manifest.json');
+    if (!Array.isArray(m) || !m.length) throw new GuardError('image manifest.json lists no image');
+    if (m.length > 1) throw new GuardError('the archive holds several images; save one image per file');
+    configPath = m[0].Config;
+    layerPaths = m[0].Layers ?? [];
+  } else {
+    const index = json('index.json');
+    const blob = (digest) => `blobs/${String(digest).replace(':', '/')}`;
+    const manifests = index.manifests ?? [];
+    if (manifests.length !== 1) throw new GuardError(`the OCI index lists ${manifests.length} manifests; export a single-platform image`);
+    const manifest = json(blob(manifests[0].digest));
+    if (manifest.manifests) throw new GuardError('the OCI index points at a multi-platform index; export a single-platform image');
+    configPath = blob(manifest.config?.digest);
+    layerPaths = (manifest.layers ?? []).map((l) => blob(l.digest));
+  }
+  const config = json(configPath);
+  const files = [];
+  const notes = [];
+  const present = new Map();
+  let total = 0;
+  layerPaths.forEach((lp, i) => {
+    const e = byPath.get(lp);
+    if (!e) throw new GuardError(`image archive is missing layer ${lp}`);
+    const tag = `layer${i + 1}`;
+    let tar = e.data;
+    if (tar[0] === 0x28 && tar[1] === 0xb5 && tar[2] === 0x2f && tar[3] === 0xfd) { notes.push(`${tag} is zstd-compressed and was not scanned`); return; }
+    if (tar[0] === 0x1f && tar[1] === 0x8b) {
+      try {
+        tar = gunzipSync(tar, { maxOutputLength: Math.max(1, MAX_UNPACKED_BYTES - total) });
+      } catch (err) {
+        throw new GuardError(`cannot gunzip ${tag}: ${err.message}`);
+      }
+    }
+    total += tar.length;
+    if (total > MAX_UNPACKED_BYTES) throw new GuardError(`the image unpacks to more than ${MAX_UNPACKED_BYTES} bytes; refusing to scan it`);
+    for (const x of readTar(tar)) {
+      const path = x.path.replace(/^\.\//, '').replace(/\/$/, '');
+      const base = path.split('/').pop();
+      if (base === '.wh..wh..opq') continue;
+      if (base.startsWith('.wh.')) {
+        const gone = [...path.split('/').slice(0, -1), base.slice(4)].join('/');
+        for (const [p, f] of present) if (p === gone || p.startsWith(`${gone}/`)) { f.deletedIn = tag; present.delete(p); }
+        continue;
+      }
+      if (x.type !== '0' && x.type !== '7') continue;
+      const f = { path: `${tag}/${path}`, inner: path, size: x.size, data: x.data, layer: tag };
+      files.push(f);
+      present.set(path, f);
+    }
+  });
+  const env = config.config?.Env ?? [];
+  const history = (config.history ?? []).map((h) => h.created_by ?? '').filter(Boolean);
+  if (env.length) files.push({ path: 'config/Env', inner: 'config/Env', size: 0, data: Buffer.from(env.join('\n')), layer: 'config' });
+  if (history.length) files.push({ path: 'config/history', inner: 'config/history', size: 0, data: Buffer.from(history.join('\n')), layer: 'config' });
+  const secretNames = env.filter((kv) => /^[A-Z0-9_]*(SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*=.+/.test(kv)).map((kv) => kv.split('=')[0]);
+  if (secretNames.length) notes.push(`image config sets credential-looking env vars: ${secretNames.join(', ')}; anyone who pulls the image can read their values`);
+  return { files, notes, name: config.config?.Labels?.['org.opencontainers.image.title'] ?? 'container image' };
+}
+
 function openTarball(file) {
   const raw = Buffer.isBuffer(file) ? file : readFileSync(file);
   if (isAsar(raw)) {
@@ -494,6 +569,11 @@ function openTarball(file) {
     throw new GuardError(`cannot gunzip ${file}: ${e.message}`);
   }
   const outer = readTar(tar);
+  const outerNames = new Set(outer.map((e) => e.path.replace(/^\.\//, '')));
+  if ((outerNames.has('manifest.json') && [...outerNames].some((n) => /(^|\/)layer\.tar$|^blobs\//.test(n))) || (outerNames.has('oci-layout') && outerNames.has('index.json'))) {
+    const img = readImage(outer);
+    return { raw, entries: [], files: img.files, kind: 'image', format: 'image', notes: img.notes, imageName: img.name };
+  }
   if (outer.some((e) => e.path === 'data.tar.gz') && outer.some((e) => e.path === 'metadata.gz')) {
     const data = outer.find((e) => e.path === 'data.tar.gz');
     let inner;
@@ -522,6 +602,7 @@ const KIND_RULES = {
   nupkg: DIR_RULES,
   jar: DIR_RULES,
   gem: DIR_RULES,
+  image: new Set(['sensitive-file', 'secret-token']),
 };
 const BROAD_HOSTS = new Set(['<all_urls>', '*://*/*', 'http://*/*', 'https://*/*', '*://*/', 'http://*/', 'https://*/']);
 
@@ -539,7 +620,7 @@ function webextWarnings(files) {
 }
 
 export function checkTarball(file, label, { asset = false } = {}) {
-  const { raw, entries, files, kind, format, notes = [] } = openTarball(file);
+  const { raw, entries, files, kind, format, notes = [], imageName } = openTarball(file);
   const sha256 = createHash('sha256').update(raw).digest('hex');
   if (kind === 'generic' && format === 'tar' && !asset) loadConfig(files);
   const allowed = KIND_RULES[kind];
@@ -586,8 +667,12 @@ export function checkTarball(file, label, { asset = false } = {}) {
   let unpackedBytes = 0;
   for (const f of files) {
     unpackedBytes += f.size;
-    const hits = [...scanPath(f.path), ...scanContent(f.data)];
-    if (NESTED_ARCHIVE.test(f.path) && !(/\.asar$/i.test(f.path) && isAsar(f.data))) warnings.push(`nested archive ${f.path} was not scanned inside`);
+    let hits = [...scanPath(f.inner ?? f.path), ...scanContent(f.data)];
+    if (kind === 'image') {
+      if (IMAGE_VENDOR_PATHS.test(f.inner)) hits = hits.filter(([rule]) => rule !== 'sensitive-file');
+      if (f.deletedIn) hits = hits.map(([rule, detail]) => [rule, `${detail ? `${detail}; ` : ''}deleted in ${f.deletedIn} but still readable in ${f.layer}`]);
+    }
+    if (kind !== 'image' && NESTED_ARCHIVE.test(f.path) && !(/\.asar$/i.test(f.path) && isAsar(f.data))) warnings.push(`nested archive ${f.path} was not scanned inside`);
     if (isMetafile(f.path, f.data)) hits.push(['build-artifact', 'esbuild metafile']);
     if (f.size > config.maxFileBytes) hits.push(['file-size', `${f.size} bytes > ${config.maxFileBytes}`]);
     record(f.path, hits);
@@ -597,7 +682,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
     version: VERSION,
     file: label ?? resolve(file),
     kind,
-    package: kind === 'asar' ? 'Electron asar archive' : kind === 'nupkg' ? 'NuGet package' : kind === 'jar' ? 'Java archive' : kind === 'gem' ? 'Ruby gem' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
+    package: kind === 'image' ? imageName : kind === 'asar' ? 'Electron asar archive' : kind === 'nupkg' ? 'NuGet package' : kind === 'jar' ? 'Java archive' : kind === 'gem' ? 'Ruby gem' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
     manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
     files: files.length,
@@ -1337,7 +1422,7 @@ const USAGE = `shipsafe ${VERSION}
 
 Usage:
   shipsafe check <file.tgz>... [--json | --format text|json|sarif|markdown]
-                                       scan npm, .vsix, .asar, .nupkg, .jar, .gem and extension .zip; exit 1 on any finding, 2 on any error
+                                       scan npm, .vsix, .asar, .nupkg, .jar, .gem, extension .zip and docker save .tar; exit 1 on any finding, 2 on any error
   shipsafe check-dir <dir>... [--json | --format ...]
                                        scan a static build output (maps, sourcesContent, credentials, secrets, buckets)
   shipsafe verify <file.tgz> [--registry <url>] [--json]

@@ -686,8 +686,57 @@ function openTarball(file) {
   const has = (p) => files.some((f) => f.path === p);
   const kind = has('PKG-INFO') && (has('pyproject.toml') || has('setup.py') || has('setup.cfg')) ? 'sdist'
     : has('Cargo.toml') && (has('Cargo.toml.orig') || has('.cargo_vcs_info.json')) ? 'crate'
+    : has('Chart.yaml') && !has('package.json') ? 'helm'
     : has('package.json') ? 'npm' : 'generic';
+  if (kind === 'helm') return { raw, ...expandSubcharts(entries), kind, format: 'tar' };
   return { raw, entries, files, kind, format: 'tar' };
+}
+
+function expandSubcharts(entries, depth = 0) {
+  const out = [];
+  const expanded = new Set();
+  const notes = [];
+  for (const e of entries) {
+    out.push(e);
+    if (e.type !== '0' || !/(^|\/)charts\/[^/]+\.tgz$/.test(e.rel) || depth >= 4) continue;
+    let inner;
+    try {
+      inner = readTar(gunzipSync(e.data, { maxOutputLength: MAX_UNPACKED_BYTES }));
+    } catch (err) {
+      notes.push(`subchart ${e.rel} could not be opened (${err.message}) and was not scanned; helm will refuse it too`);
+      continue;
+    }
+    expanded.add(e.rel);
+    const nested = expandSubcharts(inner.map((x) => ({ ...x, rel: stripRoot(x.path) })), depth + 1);
+    for (const x of nested.entries) out.push({ ...x, rel: `${e.rel}/${x.rel}` });
+    for (const p of nested.expanded) expanded.add(`${e.rel}/${p}`);
+    notes.push(...nested.notes);
+  }
+  const files = out.filter((e) => e.type === '0' || e.type === '7').map((e) => ({ path: e.rel, size: e.size, data: e.data }));
+  return { entries: out, files, expanded, notes };
+}
+
+const HELM_SECRET_KEY = /^[\w.-]*(password|passwd|secret|token|apikey|api_key|privatekey|private_key|accesskey|access_key|credentials)[\w.-]*$/i;
+const HELM_REFERENCE_KEY = /^existing|(name|ref|file|path|mount|enabled|create|ttl|expiry|expiration|length|url|endpoint|key(ref)?|annotations|labels)$/i;
+
+function chartField(files, field) {
+  const text = files.findLast((f) => f.path === 'Chart.yaml')?.data.toString('utf8') ?? '';
+  const m = new RegExp(`^${field}:\\s*["']?([^"'\\s#]+)`, 'm').exec(text);
+  return m?.[1];
+}
+
+function valuesSecrets(data) {
+  const hits = [];
+  data.toString('utf8').split(/\r?\n/).forEach((line, i) => {
+    const m = /^\s*(?:-\s+)?([\w.-]+)\s*:\s*(.*?)\s*$/.exec(line);
+    if (!m || !HELM_SECRET_KEY.test(m[1])) return;
+    const key = m[1];
+    if (HELM_REFERENCE_KEY.test(key) && !/^(secret|access)_?key$/i.test(key) && !/^api_?key$/i.test(key)) return;
+    const value = m[2].replace(/\s+#.*$/, '').replace(/^(["'])(.*)\1$/, '$2');
+    if (!value || /^(~|null|true|false|yes|no|\{\}|\[\]|[|>][-+]?\d*)$/i.test(value) || /^[&*!{]/.test(value) || /^\d+(\.\d+)?$/.test(value) || value.includes('{{')) return;
+    hits.push(`line ${i + 1}: ${key} has a literal value (${value.length} chars)`);
+  });
+  return hits;
 }
 
 const KIND_RULES = {
@@ -699,6 +748,7 @@ const KIND_RULES = {
   jar: DIR_RULES,
   gem: DIR_RULES,
   image: new Set(['sensitive-file', 'secret-token']),
+  helm: DIR_RULES,
   wheel: new Set([...DIR_RULES, 'file-size', 'entry-point', 'native-debug-info', 'wheel-record', 'vcs-dir', 'test-path']),
   sdist: new Set([...DIR_RULES, 'file-size', 'vcs-dir']),
   crate: new Set([...DIR_RULES, 'file-size', 'vcs-dir']),
@@ -817,7 +867,7 @@ function wheelChecks(files, distInfo, record, warnings) {
 }
 
 export function checkTarball(file, label, { asset = false } = {}) {
-  const { raw, entries, files, kind, format, notes = [], imageName } = openTarball(file);
+  const { raw, entries, files, kind, format, notes = [], imageName, expanded } = openTarball(file);
   const sha256 = createHash('sha256').update(raw).digest('hex');
   if (kind === 'generic' && format === 'tar' && !asset) loadConfig(files);
   const allowed = KIND_RULES[kind];
@@ -888,7 +938,11 @@ export function checkTarball(file, label, { asset = false } = {}) {
       if (IMAGE_VENDOR_PATHS.test(f.inner)) hits = hits.filter(([rule]) => rule !== 'sensitive-file');
       if (f.deletedIn) hits = hits.map(([rule, detail]) => [rule, `${detail ? `${detail}; ` : ''}deleted in ${f.deletedIn} but still readable in ${f.layer}`]);
     }
-    if (kind !== 'image' && NESTED_ARCHIVE.test(f.path) && !(/\.asar$/i.test(f.path) && isAsar(f.data))) warnings.push(`nested archive ${f.path} was not scanned inside`);
+    if (kind === 'helm' && /(^|\/)values[^/]*\.ya?ml$/i.test(f.path)) {
+      const found = valuesSecrets(f.data);
+      if (found.length) hits.push(['secret-token', `${found.slice(0, 5).join(', ')}${found.length > 5 ? `, +${found.length - 5} more` : ''}; pass credentials with --set or an existing Secret instead`]);
+    }
+    if (kind !== 'image' && !expanded?.has(f.path) && NESTED_ARCHIVE.test(f.path) && !(/\.asar$/i.test(f.path) && isAsar(f.data))) warnings.push(`nested archive ${f.path} was not scanned inside`);
     if (isMetafile(f.path, f.data)) hits.push(['build-artifact', 'esbuild metafile']);
     if (f.size > config.maxFileBytes) hits.push(['file-size', `${f.size} bytes > ${config.maxFileBytes}`]);
     record(f.path, hits);
@@ -898,7 +952,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
     version: VERSION,
     file: label ?? resolve(file),
     kind,
-    package: eco ? `${eco.name}@${eco.version} (${kind})` : kind === 'image' ? imageName : kind === 'asar' ? 'Electron asar archive' : kind === 'nupkg' ? 'NuGet package' : kind === 'jar' ? 'Java archive' : kind === 'gem' ? 'Ruby gem' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
+    package: eco ? `${eco.name}@${eco.version} (${kind})` : kind === 'image' ? imageName : kind === 'helm' ? `${chartField(files, 'name')}@${chartField(files, 'version')} (Helm chart)` : kind === 'asar' ? 'Electron asar archive' : kind === 'nupkg' ? 'NuGet package' : kind === 'jar' ? 'Java archive' : kind === 'gem' ? 'Ruby gem' : kind === 'webext' ? `${webext.name}@${webext.version} (browser extension)` : kind === 'generic' ? 'archive without a package manifest' : `${config.name}@${config.version}${kind === 'vsix' ? ' (vsix)' : ''}`,
     manifest: { name: config.name, version: config.version, private: config.private, publishConfig: config.publishConfig },
     sha256,
     files: files.length,
@@ -1527,16 +1581,77 @@ function evaluateCargo(p) {
 const PUSH_VALUE_OPTS = new Set(['-s', '--source', '-k', '--api-key', '--symbol-source', '--symbol-api-key', '-t', '--timeout', '--host', '--otp', '--key',
   '-Source', '-ApiKey', '-SymbolSource', '-SymbolApiKey', '-Timeout', '-ConfigFile', '--configfile']);
 
+const HELM_VALUE_OPTS = new Set(['--ca-file', '--cert-file', '--key-file', '--username', '--password', '--kubeconfig', '--kube-context', '--kube-apiserver', '--kube-token',
+  '--kube-as-user', '--kube-as-group', '--kube-ca-file', '--kube-tls-server-name', '-n', '--namespace', '--registry-config', '--repository-cache', '--repository-config',
+  '--burst-limit', '--qps', '--context-path', '--access-token', '--auth-header', '-u', '-p', '-v', '--version', '-a', '--app-version', '-t', '--timeout']);
+
 function findPackageUpload(prog, args, cwd) {
-  const pos = deployPositionals(args, PUSH_VALUE_OPTS);
+  const pos = deployPositionals(args, prog === 'helm' ? HELM_VALUE_OPTS : PUSH_VALUE_OPTS);
   if (prog === 'dotnet' && pos[0] === 'nuget' && pos[1] === 'push') return pos[2] ? { manager: 'dotnet nuget push', ...expandAssets([pos[2]], cwd) } : { manager: 'dotnet nuget push', error: '`dotnet nuget push` names no package; name the checked .nupkg.' };
   if (prog === 'nuget' && pos[0] === 'push') return pos[1] ? { manager: 'nuget push', ...expandAssets([pos[1]], cwd) } : { manager: 'nuget push', error: '`nuget push` names no package; name the checked .nupkg.' };
+  if (prog === 'helm' && (pos[0] === 'push' || pos[0] === 'cm-push')) {
+    const manager = `helm ${pos[0]}`;
+    if (!pos[1]) return { manager, error: `\`${manager}\` names no chart; name the packaged .tgz.` };
+    if (!/\.tgz$/i.test(pos[1])) return { manager, error: `\`${manager} ${pos[1]}\` does not name a packaged chart. Run \`helm package ${pos[1]}\`, then \`shipsafe check <chart>-<version>.tgz\`, then push that file.` };
+    return { manager, ...expandAssets([pos[1]], cwd) };
+  }
   if (prog === 'gem' && pos[0] === 'push') return pos[1] ? { manager: 'gem push', ...expandAssets([pos[1]], cwd) } : { manager: 'gem push', error: '`gem push` names no gem; name the checked .gem.' };
   if ((prog === 'mvn' || prog === 'mvnw') && args.some((a) => /(^|:)deploy-file$/.test(a))) {
     const f = args.find((a) => a.startsWith('-Dfile='));
     return f ? { manager: 'mvn deploy:deploy-file', ...expandAssets([f.slice(7)], cwd) } : null;
   }
   return null;
+}
+
+const CONTAINER_GLOBAL_OPTS = new Set(['-H', '--host', '-c', '--context', '--config', '-l', '--log-level', '--tlscacert', '--tlscert', '--tlskey',
+  '--connection', '--url', '--identity', '--root', '--runroot', '--storage-driver', '--storage-opt', '--cgroup-manager', '--events-backend', '--module']);
+const IMAGE_PUSH_VALUE_OPTS = new Set(['--builder', '-t', '--tag', '--platform', '-f', '--file', '-p', '--project-name', '--project-directory', '--profile', '--env-file', '--creds', '--authfile',
+  '--cert-dir', '--digestfile', '--format', '--compression-format', '--compression-level', '--sign-by', '--sign-by-sigstore', '--sign-passphrase-file', '--encryption-key', '--retry', '--retry-delay']);
+
+function registryOutput(args) {
+  return args.some((a, i) => a === '--push' || a === '--push=true'
+    || ((a === '-o' || a === '--output') && /(^|,)type=(registry|image,.*push=true)/.test(args[i + 1] ?? ''))
+    || /^--output=(.*,)?type=(registry|image,.*push=true)/.test(a) || /^--set=.*\.output=type=registry/.test(a));
+}
+
+function findImagePush(prog, args) {
+  const compose = prog === 'docker-compose' || prog === 'podman-compose';
+  const pos = deployPositionals(args, new Set([...CONTAINER_GLOBAL_OPTS, ...IMAGE_PUSH_VALUE_OPTS]));
+  const [sub, next] = compose ? ['compose', pos[0]] : pos;
+  if (sub === 'push' || (sub === 'image' && next === 'push')) return { manager: `${prog} push`, ref: pos[sub === 'push' ? 1 : 2] ?? null };
+  if (sub === 'compose' && pos.includes('push')) return { manager: compose ? `${prog} push` : `${prog} compose push`, compose: true };
+  if (sub === 'build' && registryOutput(args)) return { manager: `${prog} build --push`, builds: true };
+  if (sub === 'buildx' && ['build', 'b', 'bake'].includes(next) && registryOutput(args)) return { manager: `${prog} buildx ${next} --push`, builds: true };
+  return null;
+}
+
+// DECISION: the docker push opt-in is .claude/shipsafe.json at or above the cwd, not a package.json key, because image repos are often not JS and packed config must describe only the artifact.
+function dockerOptIn(cwd) {
+  for (let d = resolve(cwd); ; d = dirname(d)) {
+    const p = join(d, '.claude', 'shipsafe.json');
+    if (existsSync(p)) {
+      let json;
+      try {
+        json = JSON.parse(readFileSync(p, 'utf8'));
+      } catch (e) {
+        return { error: `${p} is not valid JSON (${e.message}); fix it or remove askOnDockerPush.` };
+      }
+      return { on: json?.askOnDockerPush === true, source: p };
+    }
+    if (dirname(d) === d) return { on: false };
+  }
+}
+
+function evaluateImagePush(p) {
+  const opt = dockerOptIn(p.cwd);
+  if (opt.error) return opt.error;
+  if (!opt.on) return null;
+  const ref = p.ref && !/[$`]/.test(p.ref) ? p.ref : '<image>';
+  const recipe = (r) => `\`docker save -o /tmp/image.tar ${r}\` (add --platform <os/arch> for a multi-platform image), \`shipsafe check /tmp/image.tar\`, then push`;
+  const how = p.builds ? `\`${p.manager}\` builds and pushes in one step, so no one checks the image. Build with --load instead, then ${recipe('<image>')} with \`docker push <image>\`.`
+    : p.compose ? `\`${p.manager}\` pushes every service image unchecked. For each image: ${recipe('<image>')}.`
+    : `\`${p.manager} ${ref}\` uploads an image shipsafe has not seen: every layer, deleted files, env and history ship with it. First ${recipe(ref)}.`;
+  return `${how} (askOnDockerPush is on in ${opt.source})`;
 }
 
 const ORCHESTRATORS = new Set(['lerna', 'changeset', 'semantic-release', 'release-it', 'np']);
@@ -1622,9 +1737,14 @@ function scanSegment(seg, cwd, ctx) {
     if (r) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed, release: !r.cargo });
     return cwd;
   }
-  if (['dotnet', 'nuget', 'gem', 'mvn', 'mvnw'].includes(prog)) {
+  if (['dotnet', 'nuget', 'gem', 'mvn', 'mvnw', 'helm'].includes(prog)) {
     const r = findPackageUpload(prog, t.slice(1), cwd);
     if (r && (r.assets || r.error)) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed, release: true });
+    return cwd;
+  }
+  if (['docker', 'podman', 'docker-compose', 'podman-compose'].includes(prog)) {
+    const r = findImagePush(prog, t.slice(1));
+    if (r) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed, image: true });
     return cwd;
   }
   if (prog === 'gh') {
@@ -1712,6 +1832,7 @@ function evaluateRelease(p) {
 }
 
 function evaluatePublish(p) {
+  if (p.image) return evaluateImagePush(p);
   if (p.cargo) return evaluateCargo(p);
   if (p.release) return evaluateRelease(p);
   if (p.deploy) return evaluateDeploy(p);
@@ -1783,7 +1904,7 @@ const USAGE = `shipsafe ${VERSION}
 
 Usage:
   shipsafe check <file.tgz>... [--json | --format text|json|sarif|markdown]
-                                       scan npm, .vsix, .asar, .nupkg, .jar, .gem, extension .zip and docker save .tar; exit 1 on any finding, 2 on any error
+                                       scan npm, .vsix, .asar, .nupkg, .jar, .gem, Helm chart .tgz, extension .zip and docker save .tar; exit 1 on any finding, 2 on any error
   shipsafe check-dir <dir>... [--json | --format ...]
                                        scan a static build output (maps, sourcesContent, credentials, secrets, buckets)
   shipsafe verify <file.tgz> [--registry <url>] [--json]

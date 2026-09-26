@@ -658,6 +658,76 @@ test('NuGet, RubyGems and Maven uploads are gated on the named file', () => {
   assert.equal(hook('dotnet build'), null);
 });
 
+function helmPackage(name, tree) {
+  const dir = join(root, 'helm-src', name);
+  for (const [path, content] of Object.entries({ 'Chart.yaml': `apiVersion: v2\nname: ${name}\nversion: 0.1.0\n`, ...tree })) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), content);
+  }
+  const out = join(root, `${name}-0.1.0.tgz`);
+  if (spawnSync('helm', ['version'], { stdio: 'ignore' }).status === 0) execFileSync('helm', ['package', dir, '-d', root], { stdio: 'ignore' });
+  else execFileSync('tar', ['-czf', out, '-C', dirname(dir), name], { env: { ...process.env, COPYFILE_DISABLE: '1' } });
+  return out;
+}
+
+test('Helm charts: leak rules, values-file secrets, subcharts and helm push', () => {
+  const sub = helmPackage('subchart', { 'values.yaml': 'auth:\n  apiKey: "abcd1234efgh"\n' });
+  mkdirSync(join(root, 'helm-src', 'webapp', 'charts'), { recursive: true });
+  writeFileSync(join(root, 'helm-src', 'webapp', 'charts', 'subchart-0.1.0.tgz'), readFileSync(sub));
+  const leaky = helmPackage('webapp', {
+    'values.yaml': [
+      'image:', '  tag: "1.0"', 'db:', '  password: hunter2hunter2', '  existingSecret: db-creds', '  passwordKey: db-password',
+      '  token: ""', '  secretName: web-tls', 'tokenTTL: 3600', 'adminPassword: "{{ .Values.x }}"', '# apiKey: commented-out',
+    ].join('\n') + '\n',
+    'templates/deployment.yaml': 'kind: Deployment\n',
+    'templates/tests/test-connection.yaml': 'kind: Pod\n',
+    'files/tls.key': 'KEY\n',
+  });
+  const r = check(leaky);
+  assert.equal(r.code, 1, r.stderr);
+  assert.equal(r.report.kind, 'helm');
+  assert.equal(r.report.package, 'webapp@0.1.0 (Helm chart)');
+  const found = r.report.findings.map((f) => `${f.rule} ${f.path}`).sort();
+  assert.deepEqual(found, ['secret-token charts/subchart-0.1.0.tgz/values.yaml', 'secret-token values.yaml', 'sensitive-file files/tls.key']);
+  const values = r.report.findings.find((f) => f.path === 'values.yaml');
+  assert.match(values.detail, /line 4: password has a literal value \(14 chars\)/);
+  assert.doesNotMatch(values.detail, /hunter2|existingSecret|passwordKey|secretName|tokenTTL|adminPassword|apiKey/);
+  assert.doesNotMatch(JSON.stringify(r.report), /abcd1234efgh/);
+  assert.ok(!r.report.warnings.some((w) => /nested archive/.test(w)), r.report.warnings.join('\n'));
+  const clean = helmPackage('clean-chart', { 'values.yaml': 'replicaCount: 1\nauth:\n  existingSecret: app\n  password: ""\n', 'templates/tests/t.yaml': 'kind: Pod\n' });
+  assert.equal(check(clean).code, 0);
+  assert.match(hook(`helm push ${leaky} oci://registry.example/charts --username u --password p`).permissionDecisionReason, /sensitive-file/);
+  assert.equal(hook(`helm push ${clean} oci://registry.example/charts`), null);
+  assert.match(hook('helm push ./webapp oci://registry.example/charts').permissionDecisionReason, /helm package/);
+  assert.match(hook(`helm cm-push ${leaky} chartmuseum`).permissionDecisionReason, /secret-token/);
+  assert.equal(hook('helm package ./webapp'), null);
+});
+
+test('docker push asks only when .claude/shipsafe.json opts in', () => {
+  const proj = join(root, 'docker-proj');
+  const sub = join(proj, 'svc');
+  mkdirSync(join(proj, '.claude'), { recursive: true });
+  mkdirSync(sub, { recursive: true });
+  assert.equal(hook('docker push registry.example/app:1', sub), null);
+  writeFileSync(join(proj, '.claude/shipsafe.json'), JSON.stringify({ askOnDockerPush: true }));
+  const ask = hook('docker push registry.example/app:1', sub);
+  assert.match(ask.permissionDecisionReason, /docker save -o \/tmp\/image\.tar registry\.example\/app:1/);
+  assert.match(ask.permissionDecisionReason, /shipsafe check \/tmp\/image\.tar/);
+  assert.match(hook('docker --context prod image push -q registry.example/app:1', sub).permissionDecisionReason, /registry\.example\/app:1/);
+  assert.match(hook('docker buildx --builder b build -t registry.example/app:1 --push .', sub).permissionDecisionReason, /builds and pushes in one step/);
+  assert.match(hook('docker build --output type=registry -t x .', sub).permissionDecisionReason, /builds and pushes/);
+  assert.match(hook('docker compose -f prod.yml push', sub).permissionDecisionReason, /every service image/);
+  assert.match(hook('cd svc && podman push app', proj).permissionDecisionReason, /podman push app/);
+  assert.equal(hook('docker build -t x .', sub), null);
+  assert.equal(hook('docker buildx build --load -t x .', sub), null);
+  assert.equal(hook('docker pull alpine', sub), null);
+  mkdirSync(join(sub, '.claude'), { recursive: true });
+  writeFileSync(join(sub, '.claude/shipsafe.json'), JSON.stringify({ askOnDockerPush: false }));
+  assert.equal(hook('docker push registry.example/app:1', sub), null, 'the nearest file wins');
+  writeFileSync(join(sub, '.claude/shipsafe.json'), '{oops');
+  assert.match(hook('docker push x', sub).permissionDecisionReason, /not valid JSON/);
+});
+
 test('docker save images: every layer, deleted files, env and history are scanned', (t) => {
   if (spawnSync('docker', ['version'], { encoding: 'utf8' }).status !== 0) { t.skip('docker is not available'); return; }
   if (spawnSync('docker', ['image', 'inspect', 'alpine:3'], { stdio: 'ignore' }).status !== 0 && spawnSync('docker', ['pull', '-q', 'alpine:3'], { stdio: 'ignore' }).status !== 0) { t.skip('alpine:3 is not available'); return; }

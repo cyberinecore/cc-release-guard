@@ -33,6 +33,7 @@ const RULES = {
   'source-dir': 'path inside a src/ directory',
   'test-path': 'test file or test directory',
   'sensitive-file': 'credential or VCS file',
+  'build-artifact': 'build metadata that lists source paths (tsbuildinfo, coverage, esbuild metafile)',
   'file-size': 'file over the size threshold',
   'bucket-url': 'URL to a storage bucket',
   'secret-token': 'credential string inside a shipped file',
@@ -241,8 +242,15 @@ function scanPath(path) {
   if (/\.(ts|tsx|mts|cts)$/i.test(base) && !/\.d\.(ts|mts|cts)$/i.test(base)) found.push(['typescript-source', '']);
   if (dirs.includes('src')) found.push(['source-dir', '']);
   if (dirs.some((d) => ['test', 'tests', '__tests__', '__mocks__', '__fixtures__'].includes(d)) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(base)) found.push(['test-path', '']);
-  if ((/^\.env(\..+)?$/.test(base) && !/^\.env\.(example|sample|template)$/.test(base)) || base === '.npmrc' || /\.(pem|key|p12|pfx)$/i.test(base) || /^id_(rsa|ed25519|ecdsa)/.test(base) || dirs.includes('.git')) found.push(['sensitive-file', '']);
+  if ((/^\.env(\..+)?$/.test(base) && !/^\.env\.(example|sample|template)$/.test(base)) || ['.npmrc', '.git-credentials', '.netrc', '_netrc', '.pypirc'].includes(base) || (dirs.includes('.aws') && ['credentials', 'config'].includes(base)) || /\.(jks|keystore)$/i.test(base) || /\.(pem|key|p12|pfx)$/i.test(base) || /^id_(rsa|ed25519|ecdsa)/.test(base) || dirs.includes('.git')) found.push(['sensitive-file', '']);
+  if (/\.tsbuildinfo$/i.test(base) || dirs.includes('coverage') || dirs.includes('.nyc_output')) found.push(['build-artifact', '']);
   return found;
+}
+
+function isMetafile(path, data) {
+  if (!/(^|[.-])meta(file)?\.json$/i.test(path.split('/').pop())) return false;
+  const text = data.toString('utf8', 0, Math.min(data.length, 4096));
+  return /"inputs"\s*:/.test(text) && /"outputs"\s*:/.test(data.toString('utf8'));
 }
 
 function scanContent(data) {
@@ -328,6 +336,7 @@ export function checkTarball(file) {
   for (const f of files) {
     unpackedBytes += f.size;
     const hits = [...scanPath(f.path), ...scanContent(f.data)];
+    if (isMetafile(f.path, f.data)) hits.push(['build-artifact', 'esbuild metafile']);
     if (f.size > config.maxFileBytes) hits.push(['file-size', `${f.size} bytes > ${config.maxFileBytes}`]);
     record(f.path, hits);
   }

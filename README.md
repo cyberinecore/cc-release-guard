@@ -21,7 +21,8 @@ What it does not do: make JavaScript unreversable. Minified JS, and the JS embed
 | `typescript-source` | `.ts`, `.tsx`, `.mts`, `.cts` other than declaration files |
 | `source-dir` | any path inside a `src/` directory |
 | `test-path` | `test/`, `tests/`, `__tests__/`, `__mocks__/`, `__fixtures__/`, `*.test.*`, `*.spec.*` |
-| `sensitive-file` | `.env*` (except `.env.example`), `.npmrc`, `*.pem`, `*.key`, `id_rsa*`, `.git/` |
+| `sensitive-file` | `.env*` (except `.env.example`), `.npmrc`, `.git-credentials`, `.netrc`, `.pypirc`, `.aws/credentials`, `.aws/config`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `id_rsa*`, `.git/` |
+| `build-artifact` | `*.tsbuildinfo`, `coverage/`, `.nyc_output/`, and esbuild metafiles (`meta.json` / `metafile.json` with `inputs` and `outputs`), which list every source path |
 | `file-size` | a file larger than `maxFileBytes` (default 5 MiB) |
 | `bucket-url` | S3, R2, GCS, Azure Blob, DigitalOcean Spaces, Backblaze B2 or Wasabi hostnames and `s3://` / `gs://` URLs |
 | `lifecycle-script` | a `preinstall`, `install` or `postinstall` script in the packed `package.json`, or a shipped `binding.gyp` (npm then runs `node-gyp rebuild` on install); allow one with `"path": "package.json#<script>"` |

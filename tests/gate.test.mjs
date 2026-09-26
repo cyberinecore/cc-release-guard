@@ -299,3 +299,16 @@ test('secret tokens in shipped files fail with a redacted detail', () => {
   }
   assert.equal(check(pack('not-secrets', { 'index.js': 'const a = "AKIA_NOT_A_KEY"; const b = "-----BEGIN PUBLIC KEY-----"; const c = "ghp_short";\n' })).code, 0);
 });
+
+test('extra credential files and build artifacts fail under their own rules', () => {
+  const creds = ['.git-credentials', '.netrc', '.pypirc', '.aws/credentials', 'keys/release.jks', 'android.keystore'];
+  const artifacts = ['tsconfig.tsbuildinfo', 'coverage/lcov.info', '.nyc_output/out.json', 'dist/meta.json'];
+  const files = Object.fromEntries([...creds, ...artifacts].map((p) => [p, 'x\n']));
+  files['dist/meta.json'] = JSON.stringify({ inputs: { 'lib/a.js': {} }, outputs: { 'dist/a.js': {} } });
+  files['dist/data.json'] = JSON.stringify({ inputs: [], note: 'not a metafile' });
+  const r = check(pack('paths', files, { files: ['**/*', '.*', '.aws/*', '.nyc_output/*'] }));
+  const byPath = Object.fromEntries(r.report.findings.map((f) => [f.path, f.rule]));
+  for (const p of creds) assert.equal(byPath[p], 'sensitive-file', p);
+  for (const p of artifacts) assert.equal(byPath[p], 'build-artifact', p);
+  assert.equal(byPath['dist/data.json'], undefined);
+});

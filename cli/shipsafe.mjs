@@ -1390,7 +1390,9 @@ const RUNNER_VALUE_OPTS = new Set(['-p', '--package', '--shell-mode', '--from', 
 const XARGS_VALUE_OPTS = new Set(['-I', '-J', '-L', '-n', '-P', '-s', '-E', '-d', '-a', '-R', '-S']);
 const MAX_NESTING = 8;
 const DEPLOY_VALUE_OPTS = {
-  wrangler: new Set(['--project-name', '--branch', '--commit-hash', '--commit-message', '--env', '-e', '--config', '-c', '--cwd']),
+  wrangler: new Set(['--project-name', '--branch', '--commit-hash', '--commit-message', '--env', '-e', '--config', '-c', '--cwd', '--assets', '--site', '--name',
+    '--compatibility-date', '--compatibility-flags', '--var', '--define', '--alias', '--route', '--routes', '--outdir', '--outfile', '--tag', '--message', '--domain',
+    '--dispatch-namespace', '--containers-rollout', '--site-include', '--site-exclude', '--jsx-factory', '--jsx-fragment', '--tsconfig', '--upload-source-maps', '--metafile']),
   vercel: new Set(['--cwd', '--scope', '-S', '--token', '-t', '--env', '-e', '--build-env', '-b', '--meta', '-m', '--target', '--archive', '--local-config', '-A', '--team', '-T']),
   netlify: new Set(['--dir', '-d', '--site', '-s', '--auth', '-a', '--message', '-m', '--alias', '--functions', '-f', '--filter', '--context', '--branch', '-b']),
   eas: new Set(['--input-dir', '--channel', '--branch', '--message', '-m', '-p', '--platform', '--environment', '--runtime-version', '--group']),
@@ -1416,13 +1418,64 @@ function tomlString(file, key) {
   return m ? m[1] : null;
 }
 
+function stripJsonc(text) {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end === -1 ? text.length : end + 1;
+    } else out += c;
+  }
+  return out.replace(/,(\s*[}\]])/g, '$1');
+}
+
 function readJsonFile(file) {
   if (!existsSync(file)) return null;
   try {
-    return JSON.parse(readFileSync(file, 'utf8').replace(/^\s*\/\/.*$/gm, ''));
+    return JSON.parse(stripJsonc(readFileSync(file, 'utf8')));
   } catch {
     return null;
   }
+}
+
+function workerAssets(args, cwd) {
+  const at = (base, rel) => resolve(base, rel);
+  const flag = optionValue(args, '--assets') ?? optionValue(args, '--site');
+  if (flag) return { dirs: [at(cwd, flag)] };
+  const env = optionValue(args, '--env') ?? optionValue(args, '-e');
+  let config = optionValue(args, '--config') ?? optionValue(args, '-c');
+  if (config) config = at(cwd, config);
+  else {
+    const redirect = join(cwd, '.wrangler', 'deploy', 'config.json');
+    const target = readJsonFile(redirect)?.configPath;
+    config = typeof target === 'string' ? at(dirname(redirect), target) : ['wrangler.jsonc', 'wrangler.json', 'wrangler.toml'].map((n) => join(cwd, n)).find((p) => existsSync(p));
+  }
+  if (!config || !existsSync(config)) return null;
+  let dir;
+  if (/\.toml$/i.test(config)) {
+    try {
+      const text = readFileSync(config, 'utf8');
+      const pick = (table) => readTomlTable(text, table, config);
+      dir = (env && pick(`env.${env}.assets`).directory) ?? pick('assets').directory ?? (env && pick(`env.${env}.site`).bucket) ?? pick('site').bucket;
+    } catch (e) {
+      return { error: `could not read ${config}: ${e.message}` };
+    }
+  } else {
+    const json = readJsonFile(config);
+    if (!json) return { error: `could not parse ${config}; shipsafe cannot tell which assets directory \`wrangler deploy\` uploads.` };
+    const scoped = env ? json.env?.[env] : null;
+    dir = scoped?.assets?.directory ?? json.assets?.directory ?? scoped?.site?.bucket ?? json.site?.bucket;
+  }
+  return typeof dir === 'string' ? { dirs: [at(dirname(config), dir)] } : null;
 }
 
 function findDeploy(prog, args, cwd) {
@@ -1430,6 +1483,13 @@ function findDeploy(prog, args, cwd) {
   const pos = deployPositionals(args, opts);
   const at = (base, rel) => resolve(base, rel);
   if (prog === 'wrangler') {
+    if (pos[0] === 'deploy' || pos[0] === 'publish' || (pos[0] === 'versions' && pos[1] === 'upload')) {
+      if (args.includes('--dry-run')) return null;
+      const manager = pos[0] === 'versions' ? 'wrangler versions upload' : `wrangler ${pos[0]}`;
+      const base = optionValue(args, '--cwd') ? at(cwd, optionValue(args, '--cwd')) : cwd;
+      const found = workerAssets(args, base);
+      return found ? { manager, ...found } : null;
+    }
     if (pos[0] !== 'pages' || !['deploy', 'publish'].includes(pos[1])) return null;
     const manager = `wrangler pages ${pos[1]}`;
     const base = optionValue(args, '--cwd') ? at(cwd, optionValue(args, '--cwd')) : cwd;

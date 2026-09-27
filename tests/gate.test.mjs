@@ -505,6 +505,38 @@ test('check-dir and the deploy hook guard static build output', () => {
   assert.match(dirAsFile.stderr, /is a directory; gate a build output with `shipsafe check-dir/);
 });
 
+test('wrangler deploy gates the Worker static assets directory', () => {
+  const w = join(root, 'worker-app');
+  const tree = { 'leaky/app.js': 'a();\n', 'leaky/app.js.map': '{"version":3}', 'clean/app.js': 'a();\n' };
+  for (const [path, body] of Object.entries(tree)) {
+    mkdirSync(dirname(join(w, path)), { recursive: true });
+    writeFileSync(join(w, path), body);
+  }
+  const at = (dir) => { mkdirSync(join(w, dir), { recursive: true }); return join(w, dir); };
+  assert.equal(hook('wrangler deploy', w), null, 'no config, no assets');
+  assert.match(hook('npx wrangler deploy --assets leaky', w).permissionDecisionReason, /source-map/);
+  assert.equal(hook('npx wrangler deploy --assets leaky --dry-run', w), null);
+  const jsonc = at('jsonc');
+  writeFileSync(join(jsonc, 'wrangler.jsonc'), '{\n  // comment with "quotes"\n  "name": "w", /* block */\n  "assets": { "directory": "../leaky", },\n  "env": { "staging": { "assets": { "directory": "../clean" } } },\n}\n');
+  assert.match(hook('wrangler deploy', jsonc).permissionDecisionReason, /check-dir failed for .*leaky/);
+  assert.equal(hook('wrangler deploy --env staging', jsonc), null);
+  assert.match(hook('wrangler versions upload', jsonc).permissionDecisionReason, /source-map/);
+  const toml = at('toml');
+  writeFileSync(join(toml, 'wrangler.toml'), 'name = "w"\nmain = "src/index.ts"\n\n[assets]\ndirectory = "../clean"\n');
+  assert.equal(hook('wrangler deploy', toml), null);
+  writeFileSync(join(toml, 'wrangler.toml'), 'name = "w"\nmain = "src/index.ts"\n');
+  assert.equal(hook('wrangler deploy', toml), null, 'a Worker without assets');
+  const vite = at('vite');
+  mkdirSync(join(vite, '.wrangler/deploy'), { recursive: true });
+  mkdirSync(join(vite, 'dist/w'), { recursive: true });
+  writeFileSync(join(vite, 'wrangler.jsonc'), '{ "name": "w", "assets": {} }\n');
+  writeFileSync(join(vite, '.wrangler/deploy/config.json'), JSON.stringify({ configPath: '../../dist/w/wrangler.json', auxiliaryWorkers: [] }));
+  writeFileSync(join(vite, 'dist/w/wrangler.json'), JSON.stringify({ name: 'w', assets: { directory: '../../../leaky' } }));
+  assert.match(hook('bunx wrangler deploy', vite).permissionDecisionReason, /check-dir failed for .*leaky/);
+  writeFileSync(join(vite, 'dist/w/wrangler.json'), '{ broken');
+  assert.match(hook('wrangler deploy', vite).permissionDecisionReason, /could not parse/);
+});
+
 test('gh release create and upload gate attached tarballs', () => {
   const rel = join(root, 'release');
   mkdirSync(rel, { recursive: true });

@@ -1,5 +1,7 @@
 # Cyberine ReleaseGuard
 
+![A package passes the ReleaseGuard gate while source files and keys are stopped before they ship](assets/banner.png)
+
 Cyberine ReleaseGuard (`cyberine-releaseguard`) is a Claude Code plugin, and `shipsafe` (npm `@cyberinecore/shipsafe`) is its standalone CLI; together they stop npm packages from shipping their source by accident. Claude Code's own npm package leaked its full source twice this way (an inline source map in February 2025, a 60 MB `cli.js.map` with `sourcesContent` in March 2026): the bundler emitted maps by default and nothing checked the tarball that was published.
 
 What it does not do: make JavaScript unreversable. Minified JS, and the JS embedded in a Bun single-file executable, stay readable with effort. shipsafe prevents accidental leaks and keeps the release process honest; logic that must stay secret belongs on a server.
@@ -85,12 +87,13 @@ Or use the composite action from this repository, which runs the CLI from its ow
   id: shipsafe
   with:
     working-directory: .
-- run: for f in ${{ steps.shipsafe.outputs.tarballs }}; do npm publish "$f" --access public; done
 ```
+
+Then publish each path the action lists in its `tarballs` output.
 
 Inputs: `tarballs` (a glob such as `out/*.tgz`; empty packs `working-directory` with `npm pack`), `working-directory`, `summary` (`true`/`false`). Output `tarballs` lists the absolute paths that passed, so the publish step uploads exactly those files. Pin a commit SHA instead of `@main` until a versioned tag exists.
 
-To see the result in review, append `--format markdown` output to `$GITHUB_STEP_SUMMARY` and upload `--format sarif` output with `github/codeql-action/upload-sarif` (needs `security-events: write`); this repo's `.github/workflows/ci.yml` does both.
+To see the result in review, append `--format markdown` output to the job summary and upload `--format sarif` output with `github/codeql-action/upload-sarif` (needs `security-events: write`); this repo's `.github/workflows/ci.yml` does both.
 
 Publish the file the gate checked, never the working tree: `npm pack --dry-run` does not run `prepublishOnly`, so it can list a different file set from the one that ships.
 
@@ -123,9 +126,9 @@ Publish the file the gate checked, never the working tree: `npm pack --dry-run` 
 
 These check different things or a different file set; run them alongside shipsafe rather than instead of it.
 
-- [publint](https://publint.dev) and [@arethetypeswrong/cli](https://github.com/arethetypeswrong/arethetypeswrong.github.io) check that a package is well formed: `exports` shapes, module formats, type resolution. shipsafe only checks that entry points exist, and otherwise asks a different question: whether the tarball carries things that should never ship.
-- [secretlint](https://github.com/secretlint/secretlint) has a much larger secret rule set and scans the files you point it at. shipsafe's `secret-token` rule covers a short list of high-confidence token formats, but it reads the packed tarball, so it sees exactly what reaches the registry and nothing that stays behind.
-- [gitleaks](https://github.com/gitleaks/gitleaks) and [trufflehog](https://github.com/trufflesecurity/trufflehog) scan git history and repositories. A secret in history never ships in a tarball that excludes it, and a secret generated at build time ships without ever touching git; each tool answers for its own file set.
+- publint and @arethetypeswrong/cli check that a package is well formed: `exports` shapes, module formats, type resolution. shipsafe only checks that entry points exist, and otherwise asks a different question: whether the tarball carries things that should never ship.
+- secretlint has a much larger secret rule set and scans the files you point it at. shipsafe's `secret-token` rule covers a short list of high-confidence token formats, but it reads the packed tarball, so it sees exactly what reaches the registry and nothing that stays behind.
+- gitleaks and trufflehog scan git history and repositories. A secret in history never ships in a tarball that excludes it, and a secret generated at build time ships without ever touching git; each tool answers for its own file set.
 
 What shipsafe adds is the tarball-native view (maps, `sourcesContent`, source and test paths, install scripts, archive integrity on the exact file that is published) and the Claude Code hook that re-checks that file at publish time.
 

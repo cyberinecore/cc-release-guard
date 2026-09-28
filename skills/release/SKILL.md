@@ -112,7 +112,7 @@ jobs:
         with:
           node-version: 22.14.0
           registry-url: https://registry.npmjs.org
-      - run: npm install -g npm@^11.5.1
+      - run: npm install -g npm@11.5.1
       - run: npm ci
       - run: npm install --global @cyberinecore/shipsafe@0.1.0
       - run: npm pack --pack-destination out

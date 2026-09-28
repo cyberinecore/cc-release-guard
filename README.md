@@ -68,7 +68,7 @@ The plugin needs Claude Code 2.1.139 or later, the first version with exec-form 
 
 ## Use in CI
 
-Add the CLI to the project's `devDependencies` at an exact version (`"@cyberinecore/shipsafe": "0.1.0"`), so `npm ci` installs the reviewed version from the lockfile, then gate the packed file:
+Add the CLI to the project's `devDependencies` at an exact version (`npm install --save-dev --save-exact @cyberinecore/shipsafe`), so `npm ci` installs the reviewed version from the lockfile, then gate the packed file:
 
 ```sh
 npm ci

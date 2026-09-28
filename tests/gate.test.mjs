@@ -66,7 +66,7 @@ test('maps, sourcesContent, TypeScript, src, tests and env files all fail', () =
 
 test('inline and remote source maps fail', () => {
   const inline = pack('inline', { 'index.js': 'a();\n//# sourceMappingURL=data:application/json;base64,eyJ2IjozfQ==\n' });
-  const remote = pack('remote', { 'index.js': 'a();\n//# sourceMappingURL=https://cdn.example.com/index.js.map\n' });
+  const remote = pack('remote', { 'index.js': 'a();\n//# sourceMappingURL=http://127.0.0.1:9/index.js.map\n' });
   assert.deepEqual(rules(check(inline).report), ['inline-source-map']);
   assert.deepEqual(rules(check(remote).report), ['remote-source-map']);
 });
@@ -717,7 +717,7 @@ test('NuGet, RubyGems and Maven uploads are gated on the named file', () => {
   assert.equal(hook(`dotnet nuget push ${cleanNu} -s https://api.nuget.org/v3/index.json`), null);
   assert.match(hook(`gem push ${gem}`).permissionDecisionReason, /sensitive-file/);
   assert.match(hook('gem push').permissionDecisionReason, /names no gem/);
-  assert.match(hook(`mvn deploy:deploy-file -Dfile=${nu} -DrepositoryId=x -Durl=https://repo.example`).permissionDecisionReason, /secret-token/);
+  assert.match(hook(`mvn deploy:deploy-file -Dfile=${nu} -DrepositoryId=x -Durl=http://127.0.0.1:9/repo`).permissionDecisionReason, /secret-token/);
   assert.equal(hook('mvn deploy'), null);
   assert.equal(hook('dotnet build'), null);
 });
@@ -760,9 +760,9 @@ test('Helm charts: leak rules, values-file secrets, subcharts and helm push', ()
   assert.ok(!r.report.warnings.some((w) => /nested archive/.test(w)), r.report.warnings.join('\n'));
   const clean = helmPackage('clean-chart', { 'values.yaml': 'replicaCount: 1\nauth:\n  existingSecret: app\n  password: ""\n', 'templates/tests/t.yaml': 'kind: Pod\n' });
   assert.equal(check(clean).code, 0);
-  assert.match(hook(`helm push ${leaky} oci://registry.example/charts --username u --password p`).permissionDecisionReason, /sensitive-file/);
-  assert.equal(hook(`helm push ${clean} oci://registry.example/charts`), null);
-  assert.match(hook('helm push ./webapp oci://registry.example/charts').permissionDecisionReason, /helm package/);
+  assert.match(hook(`helm push ${leaky} oci://localhost:5000/charts --username u --password p`).permissionDecisionReason, /sensitive-file/);
+  assert.equal(hook(`helm push ${clean} oci://localhost:5000/charts`), null);
+  assert.match(hook('helm push ./webapp oci://localhost:5000/charts').permissionDecisionReason, /helm package/);
   assert.match(hook(`helm cm-push ${leaky} chartmuseum`).permissionDecisionReason, /secret-token/);
   assert.equal(hook('helm package ./webapp'), null);
 });
@@ -772,13 +772,13 @@ test('docker push asks only when .claude/shipsafe.json opts in', () => {
   const sub = join(proj, 'svc');
   mkdirSync(join(proj, '.claude'), { recursive: true });
   mkdirSync(sub, { recursive: true });
-  assert.equal(hook('docker push registry.example/app:1', sub), null);
+  assert.equal(hook('docker push localhost:5000/app:1', sub), null);
   writeFileSync(join(proj, '.claude/shipsafe.json'), JSON.stringify({ askOnDockerPush: true }));
-  const ask = hook('docker push registry.example/app:1', sub);
-  assert.match(ask.permissionDecisionReason, /docker save -o \/tmp\/image\.tar registry\.example\/app:1/);
+  const ask = hook('docker push localhost:5000/app:1', sub);
+  assert.match(ask.permissionDecisionReason, /docker save -o \/tmp\/image\.tar localhost:5000\/app:1/);
   assert.match(ask.permissionDecisionReason, /shipsafe check \/tmp\/image\.tar/);
-  assert.match(hook('docker --context prod image push -q registry.example/app:1', sub).permissionDecisionReason, /registry\.example\/app:1/);
-  assert.match(hook('docker buildx --builder b build -t registry.example/app:1 --push .', sub).permissionDecisionReason, /builds and pushes in one step/);
+  assert.match(hook('docker --context prod image push -q localhost:5000/app:1', sub).permissionDecisionReason, /localhost:5000\/app:1/);
+  assert.match(hook('docker buildx --builder b build -t localhost:5000/app:1 --push .', sub).permissionDecisionReason, /builds and pushes in one step/);
   assert.match(hook('docker build --output type=registry -t x .', sub).permissionDecisionReason, /builds and pushes/);
   assert.match(hook('docker compose -f prod.yml push', sub).permissionDecisionReason, /every service image/);
   assert.match(hook('cd svc && podman push app', proj).permissionDecisionReason, /podman push app/);
@@ -787,7 +787,7 @@ test('docker push asks only when .claude/shipsafe.json opts in', () => {
   assert.equal(hook('docker pull alpine', sub), null);
   mkdirSync(join(sub, '.claude'), { recursive: true });
   writeFileSync(join(sub, '.claude/shipsafe.json'), JSON.stringify({ askOnDockerPush: false }));
-  assert.equal(hook('docker push registry.example/app:1', sub), null, 'the nearest file wins');
+  assert.equal(hook('docker push localhost:5000/app:1', sub), null, 'the nearest file wins');
   writeFileSync(join(sub, '.claude/shipsafe.json'), '{oops');
   assert.match(hook('docker push x', sub).permissionDecisionReason, /not valid JSON/);
 });

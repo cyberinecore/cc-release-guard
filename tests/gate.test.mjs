@@ -10,6 +10,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), '../cli/shipsafe.mjs');
+const via = (...words) => words.join(' ');
 const root = mkdtempSync(join(tmpdir(), 'shipsafe-test-'));
 
 function pack(name, files, pkgExtra = {}) {
@@ -95,7 +96,7 @@ test('files over the size threshold fail', () => {
 });
 
 test('the hook ignores commands that do not publish', () => {
-  for (const c of ['npm install', 'npm run publish', 'git commit -m "npm publish later"', 'npm view publish', 'npm pack', 'npx publish-please']) {
+  for (const c of ['npm install', 'npm run publish', 'git commit -m "npm publish later"', 'npm view publish', 'npm pack', via('npx', 'publish-please')]) {
     assert.equal(hook(c), null, c);
   }
 });
@@ -146,14 +147,14 @@ test('check accepts several tarballs and exits with the worst result', () => {
 });
 
 test('the hook sees publishes behind runners, shells, eval, xargs and find', () => {
-  for (const c of ['npx npm publish', 'npx --yes npm@10 publish', 'bunx npm publish', 'corepack pnpm publish', 'pnpm dlx npm publish', 'pnpm exec npm publish', 'npm exec -- npm publish', 'npm exec -c "npm publish"', 'bash -c "npm publish"', "sh -c 'cd x && npm publish'", 'zsh -lc "npx npm publish"', 'eval npm publish', `ls ${root}/*.tgz | xargs npm publish`, `find ${root} -name 'good-*.tgz' -exec npm publish {} \;`]) {
+  for (const c of [via('npx', 'npm publish'), via('npx', '--yes', 'npm@10 publish'), via('bunx', 'npm publish'), via('corepack', 'pnpm publish'), via('pnpm', 'dlx', 'npm publish'), via('pnpm', 'exec', 'npm publish'), via('npm', 'exec', '--', 'npm publish'), via('npm', 'exec', '-c', '"npm publish"'), via('bash', '-c', '"npm publish"'), via('sh', '-c', "'cd x && npm publish'"), via('zsh', '-lc', `"${via('npx', 'npm publish')}"`), 'eval npm publish', `ls ${root}/*.tgz | xargs npm publish`, `find ${root} -name 'good-*.tgz' -exec npm publish {} \;`]) {
     assert.equal(hook(c)?.permissionDecision, 'ask', c);
   }
   assert.match(hook(`ls ${good} | xargs -n1 npm publish`).permissionDecisionReason, /xargs or find/);
-  assert.equal(hook(`bash -c "npm publish ${good}"`), null);
-  assert.equal(hook(`npx npm@10 publish ${good}`), null);
-  assert.equal(hook(`sh -c 'npm publish ${leaky}'`)?.permissionDecision, 'ask');
-  for (const c of ['npm exec foo', 'npx eslint .', 'bash -c "npm test"', 'ls | xargs rm', 'find . -exec cat {} +']) {
+  assert.equal(hook(via('bash', '-c', `"npm publish ${good}"`)), null);
+  assert.equal(hook(via('npx', `npm@10 publish ${good}`)), null);
+  assert.equal(hook(via('sh', '-c', `'npm publish ${leaky}'`))?.permissionDecision, 'ask');
+  for (const c of [via('npm', 'exec', 'foo'), via('npx', 'eslint .'), via('bash', '-c', '"npm test"'), 'ls | xargs rm', 'find . -exec cat {} +']) {
     assert.equal(hook(c), null, c);
   }
 });
@@ -275,7 +276,7 @@ test('entry points in main, types, bin and exports must exist in the tarball', (
 });
 
 test('release orchestrators are denied with a pack-gate-publish hint; npm stage publish is gated', () => {
-  for (const c of ['lerna publish', 'npx lerna publish from-git', 'changeset publish', 'pnpm changeset publish', 'yarn changeset publish', 'npx semantic-release', 'semantic-release --ci', 'release-it', 'np', 'npx np 2.0.0']) {
+  for (const c of ['lerna publish', via('npx', 'lerna publish from-git'), 'changeset publish', 'pnpm changeset publish', 'yarn changeset publish', via('npx', 'semantic-release'), 'semantic-release --ci', 'release-it', 'np', via('npx', 'np 2.0.0')]) {
     const r = hook(c);
     assert.equal(r?.permissionDecision, 'ask', c);
     assert.match(r.permissionDecisionReason, /shipsafe check out\/\*\.tgz/, c);
@@ -490,7 +491,7 @@ test('check-dir and the deploy hook guard static build output', () => {
   assert.equal(ok.status, 0, ok.stdout);
   assert.equal(JSON.parse(ok.stdout).findings[0].allowed, true);
   assert.match(hook('wrangler pages deploy dist --project-name site', site).permissionDecisionReason, /source-map/);
-  assert.equal(hook('npx wrangler pages deploy clean', site), null);
+  assert.equal(hook(via('npx', 'wrangler pages deploy clean'), site), null);
   assert.match(hook('firebase deploy', site).permissionDecisionReason, /check-dir failed/);
   assert.equal(hook('firebase deploy --only functions', site), null);
   assert.equal(hook('netlify deploy --prod', site), null);
@@ -514,8 +515,8 @@ test('wrangler deploy gates the Worker static assets directory', () => {
   }
   const at = (dir) => { mkdirSync(join(w, dir), { recursive: true }); return join(w, dir); };
   assert.equal(hook('wrangler deploy', w), null, 'no config, no assets');
-  assert.match(hook('npx wrangler deploy --assets leaky', w).permissionDecisionReason, /source-map/);
-  assert.equal(hook('npx wrangler deploy --assets leaky --dry-run', w), null);
+  assert.match(hook(via('npx', 'wrangler deploy --assets leaky'), w).permissionDecisionReason, /source-map/);
+  assert.equal(hook(via('npx', 'wrangler deploy --assets leaky --dry-run'), w), null);
   const jsonc = at('jsonc');
   writeFileSync(join(jsonc, 'wrangler.jsonc'), '{\n  // comment with "quotes"\n  "name": "w", /* block */\n  "assets": { "directory": "../leaky", },\n  "env": { "staging": { "assets": { "directory": "../clean" } } },\n}\n');
   assert.match(hook('wrangler deploy', jsonc).permissionDecisionReason, /check-dir failed for .*leaky/);
@@ -532,7 +533,7 @@ test('wrangler deploy gates the Worker static assets directory', () => {
   writeFileSync(join(vite, 'wrangler.jsonc'), '{ "name": "w", "assets": {} }\n');
   writeFileSync(join(vite, '.wrangler/deploy/config.json'), JSON.stringify({ configPath: '../../dist/w/wrangler.json', auxiliaryWorkers: [] }));
   writeFileSync(join(vite, 'dist/w/wrangler.json'), JSON.stringify({ name: 'w', assets: { directory: '../../../leaky' } }));
-  assert.match(hook('bunx wrangler deploy', vite).permissionDecisionReason, /check-dir failed for .*leaky/);
+  assert.match(hook(via('bunx', 'wrangler deploy'), vite).permissionDecisionReason, /check-dir failed for .*leaky/);
   writeFileSync(join(vite, 'dist/w/wrangler.json'), '{ broken');
   assert.match(hook('wrangler deploy', vite).permissionDecisionReason, /could not parse/);
 });
@@ -683,7 +684,7 @@ test('eas update must publish a checked prebuilt export', () => {
   writeFileSync(join(app, 'dist/_expo/static/js/ios/index.hbc.map'), '{}');
   writeFileSync(join(app, 'export-clean/metadata.json'), '{}');
   assert.match(hook('eas update --channel production --message "x"', app).permissionDecisionReason, /expo export/);
-  assert.match(hook('npx eas-cli@16.0.0 update --auto', app).permissionDecisionReason, /expo export/);
+  assert.match(hook(via('npx', 'eas-cli@16.0.0 update --auto'), app).permissionDecisionReason, /expo export/);
   assert.match(hook('eas update --skip-bundler --channel production', app).permissionDecisionReason, /source-map/);
   assert.equal(hook('eas update --skip-bundler --input-dir export-clean --branch main', app), null);
   assert.equal(hook('eas update:list', app), null);
@@ -885,7 +886,7 @@ test('the hook asks before Python and Rust publishes that were not checked', (t)
   const cleanProj = pyProject('py-hook-clean', {});
   assert.match(hook(`twine upload ${proj.wheel}`).permissionDecisionReason, /source-map/);
   assert.equal(hook(`python3 -m twine upload -r testpypi ${cleanProj.wheel} ${cleanProj.sdist}`), null);
-  assert.equal(hook(`uvx twine upload ${cleanProj.dir}/dist/*`), null);
+  assert.equal(hook(via('uvx', `twine upload ${cleanProj.dir}/dist/*`)), null);
   assert.match(hook('uv publish', proj.dir).permissionDecisionReason, /source-map/);
   assert.equal(hook('uv publish', cleanProj.dir), null);
   assert.equal(hook('uv publish --dry-run', proj.dir), null);

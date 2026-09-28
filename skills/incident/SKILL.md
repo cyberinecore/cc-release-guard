@@ -1,6 +1,6 @@
 ---
 name: incident
-description: This skill should be used when a published npm package may have leaked source or a secret - "/shipsafe:incident", "we leaked source on npm", "lo source roi", "published a secret to npm", "token bi lo trong package", "audit published versions", "unpublish a leaked version". Scans published versions with shipsafe audit, separates credential exposure (rotate first) from source exposure, and walks the user through npm's unpublish and deprecate rules without promising removal.
+description: This skill should be used when a published npm package may have leaked source or a secret - "/cyberine-releaseguard:incident", "we leaked source on npm", "lo source roi", "published a secret to npm", "token bi lo trong package", "audit published versions", "unpublish a leaked version". Scans published versions with shipsafe audit, separates credential exposure (rotate first) from source exposure, and walks the user through npm's unpublish and deprecate rules without promising removal.
 disable-model-invocation: true
 user-invocable: true
 ---
@@ -20,7 +20,7 @@ On demand only, never a routine release stage. This skill never logs in, never p
 
 ## 3. Stop the next install from getting it
 
-1. Fix the build, pack, `check`, and publish a new patch version through `/shipsafe:release`. npm never lets a used `name@version` be published again, even after an unpublish.
+1. Fix the build, pack, `check`, and publish a new patch version through `/cyberine-releaseguard:release`. npm never lets a used `name@version` be published again, even after an unpublish.
 2. Point `latest` at the fixed version if it is not already: `! npm dist-tag add <name>@<fixed> latest --otp <code>`.
 3. Remove or mark the leaking versions, choosing by npm's unpublish policy (https://docs.npmjs.com/policies/unpublish/), checked at the time of the incident:
    - Within 72 hours of publishing, a version can be unpublished if no other package in the public registry depends on the package.

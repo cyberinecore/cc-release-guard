@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "shipsafe",
+  "name": "cyberine-releaseguard",
   "owner": {
     "name": "Nia D Pham",
     "email": "xinchao@nghia-pham.com"
@@ -8,7 +8,7 @@
   "description": "Release-safety plugins: stop packages, archives and deploys from shipping source or secrets by accident.",
   "plugins": [
     {
-      "name": "shipsafe",
+      "name": "cyberine-releaseguard",
       "source": "./",
       "description": "Artifact gate, ask-before-publish hook and release skills for npm, PyPI, crates, Helm, containers and static deploys.",
       "category": "security"

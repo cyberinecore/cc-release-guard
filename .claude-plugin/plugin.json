@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin.json",
-  "name": "cyberine-shipsafe",
+  "name": "cyberine-releaseguard",
   "version": "0.1.0",
   "description": "Stops accidental source and secret leaks when you publish or deploy: a zero-dependency gate for npm tarballs, wheels, crates, VS Code, Electron, NuGet, gem, Helm and container artifacts, plus a PreToolUse hook that asks before an unchecked publish, upload or deploy, and skills for the safe build-pack-check-publish procedure.",
   "author": {
@@ -23,5 +23,5 @@
     "helm",
     "docker"
   ],
-  "displayName": "Cyberine ShipSafe"
+  "displayName": "Cyberine ReleaseGuard"
 }

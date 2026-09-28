@@ -1,6 +1,6 @@
 ---
 name: verify
-description: This skill should be used after an npm publish to prove the registry holds exactly the tarball that was checked - "/cyberine-shipsafe:verify", "verify the publish", "kiem tra ban da publish", "registry co dung file khong", "did the right tarball ship". Compares the registry's dist.integrity for name@version with the local .tgz and runs a no-scripts install smoke test.
+description: This skill should be used after an npm publish to prove the registry holds exactly the tarball that was checked - "/cyberine-releaseguard:verify", "verify the publish", "kiem tra ban da publish", "registry co dung file khong", "did the right tarball ship". Compares the registry's dist.integrity for name@version with the local .tgz and runs a no-scripts install smoke test.
 disable-model-invocation: true
 user-invocable: true
 ---

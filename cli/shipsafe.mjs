@@ -1225,7 +1225,7 @@ function formatAudit(a) {
     else if (r.pass) lines.push(`PASS  ${r.version}${when}`);
     else lines.push(`FAIL  ${r.version}${when}: ${[...new Set(r.findings.map((f) => f.rule))].join(', ')}`, ...r.findings.slice(0, 20).map((f) => `        ${f.rule.padEnd(18)} ${f.path}${f.detail ? `: ${f.detail}` : ''}`));
   }
-  if (a.results.some((r) => !r.pass && !r.error)) lines.push('Leak found: follow /cyberine-shipsafe:incident. Rotate any exposed credential before anything else.');
+  if (a.results.some((r) => !r.pass && !r.error)) lines.push('Leak found: follow /cyberine-releaseguard:incident. Rotate any exposed credential before anything else.');
   return lines.join('\n');
 }
 

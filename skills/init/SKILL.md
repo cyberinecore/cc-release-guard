@@ -1,6 +1,6 @@
 ---
 name: init
-description: This skill should be used when a repo that publishes to npm should be set up so its releases cannot ship source by accident - "/cyberine-shipsafe:init", "setup shipsafe", "cai shipsafe cho repo nay", "chuan bi repo de publish an toan", "make this package safe to publish". Audits package.json and the build config, proposes the fixes, and runs a first gate on a real tarball.
+description: This skill should be used when a repo that publishes to npm should be set up so its releases cannot ship source by accident - "/cyberine-releaseguard:init", "setup shipsafe", "cai shipsafe cho repo nay", "chuan bi repo de publish an toan", "make this package safe to publish". Audits package.json and the build config, proposes the fixes, and runs a first gate on a real tarball.
 disable-model-invocation: true
 user-invocable: true
 ---

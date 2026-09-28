@@ -1,7 +1,7 @@
 {
   "name": "@cyberinecore/shipsafe",
   "version": "0.1.0",
-  "description": "Deterministic npm tarball gate: fails a packed .tgz that ships source maps, embedded sources, TypeScript sources, src/ or test paths, oversized files, or storage-bucket URLs.",
+  "description": "Zero-dependency release gate: fails an npm tarball, wheel, crate, .vsix, Helm chart or image archive that ships source maps, embedded sources, source or test paths, credential files or secret tokens.",
   "type": "module",
   "bin": {
     "shipsafe": "shipsafe.mjs"
@@ -15,9 +15,14 @@
   "keywords": [
     "npm",
     "publish",
+    "release",
     "tarball",
     "sourcemap",
-    "release",
+    "secrets",
+    "supply-chain",
+    "pypi",
+    "crates",
+    "helm",
     "ci"
   ],
   "author": "Nia D Pham <xinchao@nghia-pham.com>",

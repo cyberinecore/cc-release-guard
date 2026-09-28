@@ -62,7 +62,7 @@ claude plugin install shipsafe@shipsafe
 
 Official sources are only `github.com/cyberinecore/cc-release-guard` and the npm package `@cyberinecore/shipsafe`; anything under another owner is not this project.
 
-The hook needs `node` on `PATH`. If `node` is missing, the hook errors and Claude Code carries on without it.
+The plugin needs Claude Code 2.1.139 or later, the first version with exec-form hooks (`args`); on an older Claude Code the hook does not run. The hook needs Node.js 18 or later on `PATH`. If `node` is missing, the hook errors and Claude Code carries on without it.
 
 ## Use in CI
 
@@ -99,6 +99,7 @@ Publish the file the gate checked, never the working tree: `npm pack --dry-run` 
 - `verify`, `diff` (against a registry version) and `audit` contact only the registry the command targets: the npm registry, or `publishConfig.registry`/`--registry`, PyPI or the crates.io index. They send the package name and version and download public metadata and tarballs.
 - shipsafe never reads, stores or sends registry tokens or OTPs; the human types the OTP into the publish command.
 - The hook writes one empty marker file per tool call in the OS temp directory (`shipsafe-hook-<tool_use_id>`) so overlapping hook filters answer only once; markers older than a day are removed.
+- The full privacy policy is in [PRIVACY.md](PRIVACY.md); report security issues as described in [SECURITY.md](SECURITY.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limits
 

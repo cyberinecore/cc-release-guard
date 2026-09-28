@@ -1,4 +1,5 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "shipsafe",
   "owner": {
     "name": "Nia D Pham",
@@ -9,7 +10,8 @@
     {
       "name": "shipsafe",
       "source": "./",
-      "description": "Artifact gate, ask-before-publish hook and release skills for npm, PyPI, crates, Helm, containers and static deploys."
+      "description": "Artifact gate, ask-before-publish hook and release skills for npm, PyPI, crates, Helm, containers and static deploys.",
+      "category": "security"
     }
   ]
 }

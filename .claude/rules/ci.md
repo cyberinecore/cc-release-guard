@@ -7,7 +7,7 @@ Project facts about CI/CD, filled by hand: read the repo's CI config and record 
 <!-- nf:section platform -->
 
 - Platform: GitHub Actions
-- Config: `.github/workflows/ci.yml` (`npm test` plus the cli/ dogfood check on Node 18, 20 and 22, on every push and pull request)
+- Config: `.github/workflows/ci.yml` (`npm test` plus the cli/ dogfood check on Node 18, 20 and 22, and strict `claude plugin validate`, on every push and pull request)
 
 ## Deploy triggers
 <!-- nf:section deploy-triggers -->

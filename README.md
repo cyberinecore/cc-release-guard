@@ -97,6 +97,7 @@ Publish the file the gate checked, never the working tree: `npm pack --dry-run` 
 
 - The hook and `check`/`check-dir` make no network calls: they read local files only and send nothing anywhere. There is no telemetry.
 - `verify`, `diff` (against a registry version) and `audit` contact only the registry the command targets: the npm registry, or `publishConfig.registry`/`--registry`, PyPI or the crates.io index. They send the package name and version and download public metadata and tarballs.
+- The hook and the CLI never start another program and never install anything. Package runner names (`npx`, `bunx`, `pnpx`, `corepack`, `uvx`) appear in the source only so the hook can recognize a publish wrapped in one, and commands such as `npx expo export` appear only in hints printed for you to run.
 - shipsafe never reads, stores or sends registry tokens or OTPs; the human types the OTP into the publish command.
 - The hook writes one empty marker file per tool call in the OS temp directory (`shipsafe-hook-<tool_use_id>`) so overlapping hook filters answer only once; markers older than a day are removed.
 - The full privacy policy is in [PRIVACY.md](PRIVACY.md); report security issues as described in [SECURITY.md](SECURITY.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).

@@ -9,6 +9,7 @@
   },
   "homepage": "https://github.com/cyberinecore/cc-release-guard",
   "repository": "https://github.com/cyberinecore/cc-release-guard",
+  "privacyPolicyUrl": "https://github.com/cyberinecore/cc-release-guard/blob/main/PRIVACY.md",
   "license": "MIT",
   "keywords": [
     "npm",

@@ -67,13 +67,14 @@ The plugin needs Claude Code 2.1.139 or later, the first version with exec-form 
 ## Use in CI
 
 ```sh
+npm install --global @cyberinecore/shipsafe@0.1.0
 npm pack --pack-destination out
-npx --yes @cyberinecore/shipsafe@0.1.0 check out/*.tgz
+shipsafe check out/*.tgz
 for f in out/*.tgz; do npm publish "$f" --access public; done
-for f in out/*.tgz; do npx --yes @cyberinecore/shipsafe@0.1.0 verify "$f"; done
+for f in out/*.tgz; do shipsafe verify "$f"; done
 ```
 
-`shipsafe verify <file.tgz> [--registry <url>]` reads name@version from the tarball, fetches the registry's `dist.integrity` (from `publishConfig.registry`, else the npm registry) and exits 0 only when it equals the local file's sha512; 1 when the version is missing or holds a different file; 2 when the registry is unreachable. A publish from CI never passes through the hook, so this is how CI proves the file it checked is the file it published. For a wheel or sdist it compares the file's sha256 with the matching file on PyPI (`--registry` takes another index base such as `https://test.pypi.org`); for a `.crate` it compares with the `cksum` in the crates.io sparse index, which only matches when the checked file is the one cargo uploaded.
+`shipsafe verify <file.tgz> [--registry <url>]` reads name@version from the tarball, fetches the registry's `dist.integrity` (from `publishConfig.registry`, else the npm registry) and exits 0 only when it equals the local file's sha512; 1 when the version is missing or holds a different file; 2 when the registry is unreachable. A publish from CI never passes through the hook, so this is how CI proves the file it checked is the file it published. For a wheel or sdist it compares the file's sha256 with the matching file on PyPI (`--registry` takes the base URL of another package index); for a `.crate` it compares with the `cksum` in the crates.io sparse index, which only matches when the checked file is the one cargo uploaded.
 
 For a workspace, pack every package into `out/` (`npm pack --workspaces --pack-destination out`); `check` gates them all in one run and fails if any one fails.
 

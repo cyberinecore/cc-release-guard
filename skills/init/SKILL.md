@@ -37,7 +37,8 @@ Show the step that gates the same file CI publishes:
 
 ```sh
 npm pack --pack-destination out
-npx --yes @cyberinecore/shipsafe check out/<name>-<version>.tgz
+npm install --global @cyberinecore/shipsafe
+shipsafe check out/<name>-<version>.tgz
 npm publish out/<name>-<version>.tgz --provenance --access public
 ```
 

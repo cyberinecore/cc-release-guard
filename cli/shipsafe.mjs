@@ -9,7 +9,7 @@ import { gunzipSync, inflateRawSync } from 'node:zlib';
 const VERSION = '0.1.0';
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
-const CONFIG_KEYS = ['maxFileBytes', 'growthFactor', 'allow'];
+const CONFIG_FIELDS = ['maxFileBytes', 'growthFactor', 'allow'];
 const DEFAULT_GROWTH_FACTOR = 2;
 const NESTED_ARCHIVE = /\.(asar|zip|tgz|tar|tar\.gz|gz|jar|war|vsix|whl|7z|rar|xz|bz2|zst)$/i;
 const MAX_UNPACKED_BYTES = 1024 * 1024 * 1024;
@@ -276,7 +276,7 @@ function parseConfig(json) {
   const raw = json.shipsafe ?? {};
   const configWarnings = [];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new GuardError('shipsafe config in package.json must be an object');
-  for (const k of Object.keys(raw)) if (!CONFIG_KEYS.includes(k)) configWarnings.push(`unknown config key shipsafe.${k} is ignored (known: ${CONFIG_KEYS.join(', ')})`);
+  for (const k of Object.keys(raw)) if (!CONFIG_FIELDS.includes(k)) configWarnings.push(`unknown config key shipsafe.${k} is ignored (known: ${CONFIG_FIELDS.join(', ')})`);
   const maxFileBytes = raw.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
   if (!Number.isFinite(maxFileBytes) || maxFileBytes <= 0) throw new GuardError('shipsafe.maxFileBytes must be a positive number');
   const growthFactor = raw.growthFactor ?? DEFAULT_GROWTH_FACTOR;

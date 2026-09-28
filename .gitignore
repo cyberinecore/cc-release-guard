@@ -15,13 +15,6 @@ node_modules/
 #   rotation, and that asymmetry is the whole reason they sit together here.
 # Added by /nf-ignore
 
-# Agent credentials — the only files in this asset whose accidental commit
-#   cannot be undone without rotating a token. One line each, always worth it.
-.claude/.credentials.json
-.codex/auth.json
-.codex/.env
-.opencode/auth.json
-
 # Local conventions
 
 # MCP server output — runtime artifacts, never team-shared

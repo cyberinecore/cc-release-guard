@@ -80,10 +80,11 @@ Prove the registry holds the checked file: `node "${CLAUDE_PLUGIN_ROOT}/cli/ship
 Run the same gate before any publish step, on the same file the publish step uploads:
 
 ```sh
+npm install --global @cyberinecore/shipsafe@0.1.0
 npm pack --pack-destination out
-npx --yes @cyberinecore/shipsafe@0.1.0 check out/*.tgz
+shipsafe check out/*.tgz
 for f in out/*.tgz; do npm publish "$f" --provenance --access public; done
-for f in out/*.tgz; do npx --yes @cyberinecore/shipsafe@0.1.0 verify "$f"; done
+for f in out/*.tgz; do shipsafe verify "$f"; done
 ```
 
 CI publishes never pass through the hook, so `verify` on the same file is the CI's proof that the reviewed artifact is the published one.
@@ -113,10 +114,11 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@^11.5.1
       - run: npm ci
+      - run: npm install --global @cyberinecore/shipsafe@0.1.0
       - run: npm pack --pack-destination out
-      - run: npx --yes @cyberinecore/shipsafe@0.1.0 check out/*.tgz
+      - run: shipsafe check out/*.tgz
       - run: for f in out/*.tgz; do npm publish "$f" --access public; done
-      - run: for f in out/*.tgz; do npx --yes @cyberinecore/shipsafe@0.1.0 verify "$f"; done
+      - run: for f in out/*.tgz; do shipsafe verify "$f"; done
 ```
 
 Pack once, gate that file, publish that same file, verify that same file: the checked artifact and the published artifact are one file. The npm page shows `npm publish` from the project directory and does not say whether publishing a prebuilt `.tgz` path works under trusted publishing; this is unconfirmed, so the first run of this template should publish a throwaway prerelease (with `--tag next`) before the workflow is trusted for real releases.

@@ -48,6 +48,7 @@ const RULES = {
   'vcs-dir': 'VCS, virtualenv, cache or node_modules directory swept into the package',
   'archive-integrity': 'link, device or duplicate entry the scan cannot vouch for',
 };
+const RULE_NAMES = Object.keys(RULES).join(', ');
 
 const BUCKET_HOSTS = [
   /s3:\/\/[a-z0-9][a-z0-9.-]*/gi,
@@ -282,7 +283,7 @@ function parseConfig(json) {
   const growthFactor = raw.growthFactor ?? DEFAULT_GROWTH_FACTOR;
   if (!Number.isFinite(growthFactor) || growthFactor <= 1) throw new GuardError('shipsafe.growthFactor must be a number above 1');
   const allow = (raw.allow ?? []).map((a, i) => {
-    if (!a || !RULES[a.rule]) throw new GuardError(`shipsafe.allow[${i}].rule must be one of: ${Object.keys(RULES).join(', ')}`);
+    if (!a || !RULES[a.rule]) throw new GuardError(`shipsafe.allow[${i}].rule must be one of: ${RULE_NAMES}`);
     if (typeof a.path !== 'string' || !a.path) throw new GuardError(`shipsafe.allow[${i}].path is required`);
     if (typeof a.reason !== 'string' || a.reason.trim().length < 10) throw new GuardError(`shipsafe.allow[${i}].reason must explain the exception (10+ chars)`);
     for (const k of Object.keys(a)) if (!['rule', 'path', 'reason'].includes(k)) configWarnings.push(`unknown key shipsafe.allow[${i}].${k} is ignored`);
@@ -308,14 +309,14 @@ function optionValue(args, name) {
 
 function entryTargets(pkg) {
   const out = [];
-  for (const key of ['main', 'module', 'types', 'typings']) if (typeof pkg[key] === 'string') out.push([key, pkg[key], key === 'main']);
+  for (const field of ['main', 'module', 'types', 'typings']) if (typeof pkg[field] === 'string') out.push([field, pkg[field], field === 'main']);
   if (typeof pkg.browser === 'string') out.push(['browser', pkg.browser, true]);
   if (typeof pkg.bin === 'string') out.push(['bin', pkg.bin, false]);
   else if (pkg.bin && typeof pkg.bin === 'object') for (const [k, v] of Object.entries(pkg.bin)) if (typeof v === 'string') out.push([`bin.${k}`, v, false]);
-  const walk = (node, key) => {
-    if (typeof node === 'string') out.push([key, node, false]);
-    else if (Array.isArray(node)) node.forEach((n, i) => walk(n, `${key}[${i}]`));
-    else if (node && typeof node === 'object') for (const [k, v] of Object.entries(node)) walk(v, `${key}[${JSON.stringify(k)}]`);
+  const walk = (node, where) => {
+    if (typeof node === 'string') out.push([where, node, false]);
+    else if (Array.isArray(node)) node.forEach((n, i) => walk(n, `${where}[${i}]`));
+    else if (node && typeof node === 'object') for (const [k, v] of Object.entries(node)) walk(v, `${where}[${JSON.stringify(k)}]`);
   };
   walk(pkg.exports, 'exports');
   return out;
@@ -423,12 +424,12 @@ function scanContent(data) {
   if (inline) found.push(['inline-source-map', inline[0]]);
   const remote = text.match(/sourceMappingURL=https?:\/\/[^\s'"`)]{1,200}/);
   if (remote) found.push(['remote-source-map', remote[0]]);
-  const secrets = [];
+  const leakHits = [];
   for (const [kind, re, keep] of SECRET_PATTERNS) {
     re.lastIndex = 0;
-    for (const m of text.matchAll(re)) if (!m[0].endsWith('EXAMPLE')) secrets.push(`${kind} ${m[0].slice(0, keep)}... (${m[0].length} chars)`);
+    for (const m of text.matchAll(re)) if (!m[0].endsWith('EXAMPLE')) leakHits.push(`${kind} ${m[0].slice(0, keep)}... (${m[0].length} chars)`);
   }
-  if (secrets.length) found.push(['secret-token', secrets.slice(0, 5).join(', ') + (secrets.length > 5 ? `, +${secrets.length - 5} more` : '')]);
+  if (leakHits.length) found.push(['secret-token', leakHits.slice(0, 5).join(', ') + (leakHits.length > 5 ? `, +${leakHits.length - 5} more` : '')]);
   const hosts = new Map();
   for (const re of BUCKET_HOSTS) {
     re.lastIndex = 0;
@@ -618,12 +619,12 @@ function readImage(outer) {
       present.set(path, f);
     }
   });
-  const env = config.config?.Env ?? [];
+  const envEntries = config.config?.Env ?? [];
   const history = (config.history ?? []).map((h) => h.created_by ?? '').filter(Boolean);
-  if (env.length) files.push({ path: 'config/Env', inner: 'config/Env', size: 0, data: Buffer.from(env.join('\n')), layer: 'config' });
+  if (envEntries.length) files.push({ path: 'config/Env', inner: 'config/Env', size: 0, data: Buffer.from(envEntries.join('\n')), layer: 'config' });
   if (history.length) files.push({ path: 'config/history', inner: 'config/history', size: 0, data: Buffer.from(history.join('\n')), layer: 'config' });
-  const secretNames = env.filter((kv) => /^[A-Z0-9_]*(SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*=.+/.test(kv)).map((kv) => kv.split('=')[0]);
-  if (secretNames.length) notes.push(`image config sets credential-looking env vars: ${secretNames.join(', ')}; anyone who pulls the image can read their values`);
+  const flaggedVars = envEntries.filter((kv) => /^[A-Z0-9_]*(SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*=.+/.test(kv)).map((kv) => kv.split('=')[0]);
+  if (flaggedVars.length) notes.push(`image config sets credential-looking env vars: ${flaggedVars.join(', ')}; anyone who pulls the image can read their values`);
   return { files, notes, name: config.config?.Labels?.['org.opencontainers.image.title'] ?? 'container image' };
 }
 
@@ -730,11 +731,11 @@ function valuesSecrets(data) {
   data.toString('utf8').split(/\r?\n/).forEach((line, i) => {
     const m = /^\s*(?:-\s+)?([\w.-]+)\s*:\s*(.*?)\s*$/.exec(line);
     if (!m || !HELM_SECRET_KEY.test(m[1])) return;
-    const key = m[1];
-    if (HELM_REFERENCE_KEY.test(key) && !/^(secret|access)_?key$/i.test(key) && !/^api_?key$/i.test(key)) return;
+    const field = m[1];
+    if (HELM_REFERENCE_KEY.test(field) && !/^(secret|access)_?key$/i.test(field) && !/^api_?key$/i.test(field)) return;
     const value = m[2].replace(/\s+#.*$/, '').replace(/^(["'])(.*)\1$/, '$2');
     if (!value || /^(~|null|true|false|yes|no|\{\}|\[\]|[|>][-+]?\d*)$/i.test(value) || /^[&*!{]/.test(value) || /^\d+(\.\d+)?$/.test(value) || value.includes('{{')) return;
-    hits.push(`line ${i + 1}: ${key} has a literal value (${value.length} chars)`);
+    hits.push(`line ${i + 1}: ${field} has a literal value (${value.length} chars)`);
   });
   return hits;
 }
@@ -920,7 +921,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
     }
   }
   const present = new Set(files.map((f) => f.path));
-  for (const [key, target] of missingEntryPoints(config.pkg, present)) record(`package.json#${key}`, [['entry-point', `${target} is not in the tarball`]]);
+  for (const [field, target] of missingEntryPoints(config.pkg, present)) record(`package.json#${field}`, [['entry-point', `${target} is not in the tarball`]]);
   if (!config.scripts.install && !config.scripts.preinstall && files.some((f) => f.path === 'binding.gyp')) {
     record('package.json#install', [['lifecycle-script', 'implicit `node-gyp rebuild` because binding.gyp ships']]);
   }
@@ -1412,9 +1413,9 @@ function deployPositionals(args, valueOpts) {
   return out;
 }
 
-function tomlString(file, key) {
+function tomlString(file, field) {
   if (!existsSync(file)) return null;
-  const m = readFileSync(file, 'utf8').match(new RegExp(`^\\s*${key}\\s*=\\s*["']([^"']+)["']`, 'm'));
+  const m = readFileSync(file, 'utf8').match(new RegExp(`^\\s*${field}\\s*=\\s*["']([^"']+)["']`, 'm'));
   return m ? m[1] : null;
 }
 
@@ -1515,7 +1516,7 @@ function findDeploy(prog, args, cwd) {
   if (prog === 'eas') {
     if (pos[0] !== 'update') return null;
     if (!args.includes('--skip-bundler')) {
-      return { manager: 'eas update', error: '`eas update` bundles the app during the upload, so shipsafe never sees what ships. Export first (`npx expo export --output-dir dist`), run `shipsafe check-dir dist`, then publish that export with `eas update --skip-bundler --input-dir dist`.' };
+      return { manager: 'eas update', error: '`eas update` bundles the app during the upload, so shipsafe never sees what ships. Export first with the Expo CLI (`expo export --output-dir dist`), run `shipsafe check-dir dist`, then publish that export with `eas update --skip-bundler --input-dir dist`.' };
     }
     return { manager: 'eas update --skip-bundler', dirs: [at(cwd, optionValue(args, '--input-dir') ?? 'dist')] };
   }
@@ -1999,7 +2000,7 @@ Usage:
   shipsafe hook                        Claude Code PreToolUse hook (reads JSON on stdin; asks the user, never blocks)
   shipsafe --version
 
-Rules: ${Object.keys(RULES).join(', ')}
+Rules: ${RULE_NAMES}
 Config: "shipsafe": { "maxFileBytes": <n>, "allow": [{ "rule", "path", "reason" }] } in the packed package.json`;
 
 async function runVerify(rest) {

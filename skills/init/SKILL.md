@@ -33,12 +33,12 @@ Report findings grouped by rule with the fix for each, and repeat until it passe
 
 ## 4. CI (offer, do not write unasked)
 
-Show the step that gates the same file CI publishes:
+Show the step that gates the same file CI publishes. It needs the CLI to the project's `devDependencies` at an exact version (`"@cyberinecore/shipsafe": "0.1.0"`), so `npm ci` installs the reviewed version from the lockfile, first:
 
 ```sh
+npm ci
 npm pack --pack-destination out
-npm install --global @cyberinecore/shipsafe
-shipsafe check out/<name>-<version>.tgz
+node_modules/.bin/shipsafe check out/<name>-<version>.tgz
 npm publish out/<name>-<version>.tgz --provenance --access public
 ```
 

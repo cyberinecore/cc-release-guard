@@ -618,25 +618,46 @@ test('zip reader: symlinks are findings, truncated or hostile zips exit 2', () =
   assert.equal(check(cut).code, 2);
 });
 
-function asarPack(name, tree, extra = []) {
-  const dir = join(root, `${name}-app`);
-  for (const [path, content] of Object.entries(tree)) {
-    mkdirSync(dirname(join(dir, path)), { recursive: true });
-    writeFileSync(join(dir, path), content);
-  }
+function asarPack(name, tree, unpack = () => false) {
   const out = join(root, `${name}.asar`);
-  const r = spawnSync('npx', ['--yes', '@electron/asar', 'pack', dir, out, ...extra], { encoding: 'utf8' });
-  return r.status === 0 ? out : null;
+  const header = { files: {} };
+  const blobs = [];
+  let offset = 0;
+  for (const [path, content] of Object.entries(tree)) {
+    const data = Buffer.from(content);
+    const parts = path.split('/');
+    let node = header;
+    for (const dir of parts.slice(0, -1)) node = (node.files[dir] ??= { files: {} });
+    if (unpack(path)) {
+      node.files[parts.at(-1)] = { size: data.length, unpacked: true };
+      mkdirSync(dirname(join(`${out}.unpacked`, path)), { recursive: true });
+      writeFileSync(join(`${out}.unpacked`, path), data);
+    } else {
+      node.files[parts.at(-1)] = { size: data.length, offset: String(offset) };
+      blobs.push(data);
+      offset += data.length;
+    }
+  }
+  const json = Buffer.from(JSON.stringify(header));
+  const pad = (4 - (json.length % 4)) % 4;
+  const headerPickle = Buffer.alloc(8 + json.length + pad);
+  headerPickle.writeUInt32LE(4 + json.length + pad, 0);
+  headerPickle.writeUInt32LE(json.length, 4);
+  json.copy(headerPickle, 8);
+  const sizePickle = Buffer.alloc(8);
+  sizePickle.writeUInt32LE(4, 0);
+  sizePickle.writeUInt32LE(headerPickle.length, 4);
+  writeFileSync(out, Buffer.concat([sizePickle, headerPickle, ...blobs]));
+  return out;
 }
 
-test('Electron asar archives are scanned, directly and inside a zip', (t) => {
+test('Electron asar archives are scanned, directly and inside a zip', () => {
   const bad = asarPack('bad-app', { 'package.json': '{"name":"app"}', 'dist/main.js': 'a()\n', 'dist/main.js.map': '{}', 'src/renderer.ts': 'x\n' });
-  if (!bad) { t.skip('@electron/asar is not available'); return; }
   const r = check(bad);
   assert.equal(r.code, 1);
   assert.equal(r.report.kind, 'asar');
   assert.deepEqual(rules(r.report), ['source-map', 'typescript-source']);
-  const clean = asarPack('clean-app', { 'package.json': '{"name":"app"}', 'dist/main.js': 'a()\n', 'lib/native.node': 'bin' }, ['--unpack', '*.node']);
+  const clean = asarPack('clean-app', { 'package.json': '{"name":"app"}', 'dist/main.js': 'a()\n', 'lib/native.node': 'bin' }, (p) => p.endsWith('.node'));
   const ok = check(clean);
   assert.equal(ok.code, 0, JSON.stringify(ok.report?.findings));
   assert.match(ok.report.warnings.join('\n'), /lib\/native\.node is unpacked/);
@@ -662,7 +683,7 @@ test('eas update must publish a checked prebuilt export', () => {
   writeFileSync(join(app, 'dist/_expo/static/js/ios/index.hbc.map'), '{}');
   writeFileSync(join(app, 'export-clean/metadata.json'), '{}');
   assert.match(hook('eas update --channel production --message "x"', app).permissionDecisionReason, /expo export/);
-  assert.match(hook('npx eas-cli@latest update --auto', app).permissionDecisionReason, /expo export/);
+  assert.match(hook('npx eas-cli@16.0.0 update --auto', app).permissionDecisionReason, /expo export/);
   assert.match(hook('eas update --skip-bundler --channel production', app).permissionDecisionReason, /source-map/);
   assert.equal(hook('eas update --skip-bundler --input-dir export-clean --branch main', app), null);
   assert.equal(hook('eas update:list', app), null);
@@ -691,7 +712,7 @@ test('NuGet, RubyGems and Maven uploads are gated on the named file', () => {
   assert.equal(g.code, 1);
   assert.equal(g.report.kind, 'gem');
   assert.deepEqual(g.report.findings.map((f) => [f.rule, f.path]), [['sensitive-file', '.env']]);
-  assert.match(hook(`dotnet nuget push ${nu} --source https://api.nuget.org/v3/index.json --api-key KEY`).permissionDecisionReason, /secret-token/);
+  assert.match(hook(`dotnet nuget push ${nu} --source nuget.org -k PLACEHOLDER`).permissionDecisionReason, /secret-token/);
   assert.equal(hook(`dotnet nuget push ${cleanNu} -s https://api.nuget.org/v3/index.json`), null);
   assert.match(hook(`gem push ${gem}`).permissionDecisionReason, /sensitive-file/);
   assert.match(hook('gem push').permissionDecisionReason, /names no gem/);
@@ -777,7 +798,7 @@ test('docker save images: every layer, deleted files, env and history are scanne
   mkdirSync(join(ctx, 'app'), { recursive: true });
   writeFileSync(join(ctx, 'app/index.js'), 'a()\n');
   writeFileSync(join(ctx, 'app/.env'), 'SECRET=1\n');
-  const token = 'np' + 'm_' + 'x'.repeat(36);
+  const probeValue = 'np' + 'm_' + 'x'.repeat(36);
   const build = (tag, dockerfile) => {
     writeFileSync(join(ctx, 'Dockerfile'), dockerfile);
     const b = spawnSync('docker', ['build', '-q', '-t', tag, ctx], { encoding: 'utf8' });
@@ -787,7 +808,7 @@ test('docker save images: every layer, deleted files, env and history are scanne
     execFileSync('docker', ['rmi', '-f', tag], { stdio: 'ignore' });
     return out;
   };
-  const leaky = build('shipsafe-probe:leaky', `FROM alpine:3\nCOPY app /app\nRUN rm /app/.env\nENV NPM_TOKEN=${token}\n`);
+  const leaky = build('shipsafe-probe:leaky', `FROM alpine:3\nCOPY app /app\nRUN rm /app/.env\nENV NPM_TOKEN=${probeValue}\n`);
   const r = check(leaky);
   assert.equal(r.code, 1, r.stderr);
   assert.equal(r.report.kind, 'image');

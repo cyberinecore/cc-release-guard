@@ -69,29 +69,29 @@ Everything above happens before the user fetches an OTP, because a code lasts ab
 
 Keep the `check && publish` form even though the gate just passed: it has not been verified whether the hook fires for commands the user types with `!`, so the line carries its own gate.
 
-The plugin's hook re-runs the gate on that exact file when Claude runs a publish command and, instead of blocking, asks the user before `npm publish` / `pnpm publish` / `bun publish` without a passing tarball (also behind `npx`, `corepack`, `bash -c`, `eval`), `yarn npm publish` always (it cannot publish a prebuilt tarball), release orchestrators (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`), a scoped package without an explicit `--access`, and a prerelease headed for the `latest` tag. It does not see publishes hidden inside `npm run <script>` or run outside Claude Code, so CI must run the gate itself.
+The plugin's hook re-runs the gate on that exact file when Claude runs a publish command and, instead of blocking, asks the user before `npm publish` / `pnpm publish` / `bun publish` without a passing tarball (also behind a package runner, corepack, a shell given `-c`, or `eval`), `yarn npm publish` always (it cannot publish a prebuilt tarball), release orchestrators (`lerna publish`, `changeset publish`, `semantic-release`, `release-it`, `np`), a scoped package without an explicit `--access`, and a prerelease headed for the `latest` tag. It does not see publishes hidden inside `npm run <script>` or run outside Claude Code, so CI must run the gate itself.
 
 ## 5. After publish
 
-Prove the registry holds the checked file: `node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" verify /abs/path/<name>-<version>.tgz` must print MATCH (exit 0). Then smoke-test the published package without running its scripts, in a scratch directory: `npm install --ignore-scripts <name>@<version>` and import it (or run its `bin --version`). `/cyberine-releaseguard:verify` carries the full procedure.
+Prove the registry holds the checked file: `node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" verify /abs/path/<name>-<version>.tgz` must print MATCH (exit 0). Then smoke-test the checked tarball, which `verify` just proved is byte-identical to the published one, without running its scripts: install `/abs/path/<name>-<version>.tgz` with `--ignore-scripts` into a scratch directory and import it (or run its `bin --version`). `/cyberine-releaseguard:verify` carries the full procedure.
 
 ## CI
 
-Run the same gate before any publish step, on the same file the publish step uploads:
+Run the same gate before any publish step, on the same file the publish step uploads. Add the CLI to the project's `devDependencies` at an exact version (`"@cyberinecore/shipsafe": "0.1.0"`), so `npm ci` installs the reviewed version from the lockfile:
 
 ```sh
-npm install --global @cyberinecore/shipsafe@0.1.0
+npm ci
 npm pack --pack-destination out
-shipsafe check out/*.tgz
+node_modules/.bin/shipsafe check out/*.tgz
 for f in out/*.tgz; do npm publish "$f" --provenance --access public; done
-for f in out/*.tgz; do shipsafe verify "$f"; done
+for f in out/*.tgz; do node_modules/.bin/shipsafe verify "$f"; done
 ```
 
 CI publishes never pass through the hook, so `verify` on the same file is the CI's proof that the reviewed artifact is the published one.
 
 ## CI with trusted publishing (OIDC)
 
-Template checked on 2026-09-27 against https://docs.npmjs.com/trusted-publishers/, which states: trusted publishing needs npm CLI 11.5.1 or later and Node 22.14.0 or higher, the workflow needs `id-token: write`, and provenance is generated automatically. Re-check that page before using this template; it drifts. No token exists anywhere in this flow, so there is nothing for the skill to handle.
+Template checked on 2026-09-27 against https://docs.npmjs.com/trusted-publishers/, which states: trusted publishing needs npm CLI 11.5.1 or later and Node 22.14.0 or higher, the workflow needs `id-token: write`, and provenance is generated automatically. Node 24.11.0 is the first LTS release that bundles npm 11.5.1 or later (it ships npm 11.6.1, per nodejs.org/dist/index.json on 2026-09-28), so the template pins it instead of upgrading npm inside the job. Re-check that page before using this template; it drifts. No token exists anywhere in this flow, so there is nothing for the skill to handle.
 
 First the user links the package to the repository and workflow file on npmjs.com (package settings, Trusted Publisher). That step is theirs; guide them there, never do it for them.
 
@@ -110,15 +110,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.14.0
+          node-version: 24.11.0
           registry-url: https://registry.npmjs.org
-      - run: npm install -g npm@11.5.1
       - run: npm ci
-      - run: npm install --global @cyberinecore/shipsafe@0.1.0
       - run: npm pack --pack-destination out
-      - run: shipsafe check out/*.tgz
+      - run: node_modules/.bin/shipsafe check out/*.tgz
       - run: for f in out/*.tgz; do npm publish "$f" --access public; done
-      - run: for f in out/*.tgz; do shipsafe verify "$f"; done
+      - run: for f in out/*.tgz; do node_modules/.bin/shipsafe verify "$f"; done
 ```
 
 Pack once, gate that file, publish that same file, verify that same file: the checked artifact and the published artifact are one file. The npm page shows `npm publish` from the project directory and does not say whether publishing a prebuilt `.tgz` path works under trusted publishing; this is unconfirmed, so the first run of this template should publish a throwaway prerelease (with `--tag next`) before the workflow is trusted for real releases.

@@ -73,7 +73,7 @@ The plugin's hook re-runs the gate on that exact file when Claude runs a publish
 
 ## 5. After publish
 
-Prove the registry holds the checked file: `node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" verify /abs/path/<name>-<version>.tgz` must print MATCH (exit 0). Then smoke-test the published package without running its scripts, in a scratch directory: `npm install --ignore-scripts <name>@<version>` and import it (or run its `bin --version`). `/shipsafe:verify` carries the full procedure.
+Prove the registry holds the checked file: `node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs" verify /abs/path/<name>-<version>.tgz` must print MATCH (exit 0). Then smoke-test the published package without running its scripts, in a scratch directory: `npm install --ignore-scripts <name>@<version>` and import it (or run its `bin --version`). `/cyberine-shipsafe:verify` carries the full procedure.
 
 ## CI
 

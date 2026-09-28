@@ -1,6 +1,6 @@
 ---
 name: check
-description: This skill should be used when the user wants to know whether a package, archive or build output would leak source or secrets without publishing or deploying it - "/shipsafe:check", "check tarball", "check dist", "kiem tra truoc khi publish", "co lo source khong", "package nay co ship src khong", "scan this .tgz", "what would ship if I published". Packs the real tarball (or takes a given file or build directory), runs the shipsafe gate, and explains each finding with its fix.
+description: This skill should be used when the user wants to know whether a package, archive or build output would leak source or secrets without publishing or deploying it - "/cyberine-shipsafe:check", "check tarball", "check dist", "kiem tra truoc khi publish", "co lo source khong", "package nay co ship src khong", "scan this .tgz", "what would ship if I published". Packs the real tarball (or takes a given file or build directory), runs the shipsafe gate, and explains each finding with its fix.
 disable-model-invocation: true
 user-invocable: true
 ---
@@ -18,4 +18,4 @@ Read-only on the user's intent: this skill never publishes and never edits the r
 "shipsafe": { "allow": [{ "rule": "bucket-url", "path": "dist/*.js", "reason": "documented public download bucket" }] }
 ```
 
-Fix the build, not the gate. To publish after a PASS, hand over to `/shipsafe:release`.
+Fix the build, not the gate. To publish after a PASS, hand over to `/cyberine-shipsafe:release`.

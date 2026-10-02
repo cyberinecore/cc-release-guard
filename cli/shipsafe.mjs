@@ -72,7 +72,50 @@ const SECRET_PATTERNS = [
   ['Stripe live key', /\b[rs]k_live_[A-Za-z0-9]{20,247}\b/g, 8],
   ['Slack token', /\bxox[abpr]-[A-Za-z0-9-]{10,250}/g, 5],
   ['private key block', /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/g, 10],
+  ['Anthropic API key', /(?<![\w-])sk-ant-(?:api03|admin01)-[\w-]{93}AA(?![\w-])/g, 0, realKey],
+  ['OpenAI API key', /(?<![\w-])sk-(?:proj|svcacct|admin)-(?:[\w-]{74}|[\w-]{58})T3BlbkFJ(?:[\w-]{74}|[\w-]{58})(?![\w-])/g, 0, realKey],
+  ['OpenAI API key', /(?<![\w-])sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20}(?![\w-])/g, 0, realKey],
+  ['URL with password', /\b(?:postgres(?:ql)?|mongodb(?:\+srv)?|rediss?|amqps?|mysql|mariadb|mssql|https?|ftps?):\/\/([^:\s\/?#@'"`\\<>{}]{0,128}):([^\s\/?#@'"`\\<>{}]{1,256})@(\[[0-9a-f:.]{2,64}\]|[a-z0-9.-]{1,253})/gi, 0, realUrlPassword],
+  ['Basic auth header', /\bauthorization["']?[ \t]{0,8}:[ \t]{0,8}["']?Basic[ \t]{1,8}([A-Za-z0-9+/]{4,1024}={0,2})(?![A-Za-z0-9+/=])/gi, 0, realBasicAuth],
 ];
+
+const PLACEHOLDER_SECRET = /^(?:pass(?:word|wd)?|pwd|secret|token|changeme|change[-_]?me|(?:your|my|the|some)[-_]?(?:pass(?:word)?|secret|token|key|pwd)|example|dummy|redacted|hunter2|\*+|x+|\.+|<.*>|\[.*\]|\$.*|%.*%)$/i;
+const EXAMPLE_HOST = /(?:^|\.)(?:example\.(?:com|org|net)|example|test|invalid)$/i;
+
+const PLACEHOLDER_WORD = /pass|pwd|secret|token|foobar|auth|change|example|dummy|sample|test|redact|xxx|qwerty|letmein|admin|hunter/;
+
+function placeholderCredential(user, password) {
+  const plain = password.toLowerCase().replace(/[@4]/g, 'a').replace(/0/g, 'o').replace(/[1!]/g, 'i').replace(/3/g, 'e').replace(/[5$]/g, 's');
+  return !password || password === user || PLACEHOLDER_SECRET.test(password) || PLACEHOLDER_WORD.test(plain) || /(.)\1{5,}/.test(password);
+}
+
+function decodeUrlPart(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+function realKey(m) {
+  return !/(.)\1{9,}/.test(m[0]);
+}
+
+function realUrlPassword(m) {
+  return !EXAMPLE_HOST.test(m[3].replace(/^\[|\]$/g, '')) && !placeholderCredential(decodeUrlPart(m[1]), decodeUrlPart(m[2]));
+}
+
+function realBasicAuth(m) {
+  const b64 = m[1];
+  if (b64.length % 4 !== 0) return false;
+  const decoded = Buffer.from(b64, 'base64').toString('latin1');
+  if (/[\x00-\x1f\x7f-\xff]/.test(decoded)) return false;
+  const colon = decoded.indexOf(':');
+  if (colon < 1) return false;
+  const user = decoded.slice(0, colon);
+  const password = decoded.slice(colon + 1);
+  return decoded !== 'Aladdin:open sesame' && !placeholderCredential(user, password);
+}
 
 class GuardError extends Error {}
 
@@ -425,9 +468,12 @@ function scanContent(data) {
   const remote = text.match(/sourceMappingURL=https?:\/\/[^\s'"`)]{1,200}/);
   if (remote) found.push(['remote-source-map', remote[0]]);
   const leakHits = [];
-  for (const [kind, re, keep] of SECRET_PATTERNS) {
+  for (const [kind, re, keep, valid] of SECRET_PATTERNS) {
     re.lastIndex = 0;
-    for (const m of text.matchAll(re)) if (!m[0].endsWith('EXAMPLE')) leakHits.push(`${kind} ${m[0].slice(0, keep)}... (${m[0].length} chars)`);
+    for (const m of text.matchAll(re)) {
+      if (m[0].endsWith('EXAMPLE') || (valid && !valid(m))) continue;
+      leakHits.push(keep ? `${kind} ${m[0].slice(0, keep)}... (${m[0].length} chars)` : `${kind} (${m[0].length} chars)`);
+    }
   }
   if (leakHits.length) found.push(['secret-token', leakHits.slice(0, 5).join(', ') + (leakHits.length > 5 ? `, +${leakHits.length - 5} more` : '')]);
   const hosts = new Map();

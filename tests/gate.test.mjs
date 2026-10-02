@@ -310,6 +310,62 @@ test('secret tokens in shipped files fail with a redacted detail', () => {
   assert.equal(check(pack('not-secrets', { 'index.js': 'const a = "AKIA_NOT_A_KEY"; const b = "-----BEGIN PUBLIC KEY-----"; const c = "ghp_short";\n' })).code, 0);
 });
 
+test('URL passwords, Basic auth headers and Anthropic/OpenAI keys fail without echoing the value', () => {
+  const rnd = (seed, n, enc = 'base64url') => {
+    let s = '';
+    for (let i = 0; s.length < n; i++) s += createHash('sha512').update(`${seed}${i}`).digest(enc);
+    return s.slice(0, n);
+  };
+  const b64 = (s) => Buffer.from(s).toString('base64');
+  const marker = 'T3Blbk' + 'FJ';
+  const leaks = {
+    'dist/anthropic.js': `const k = "${'sk-' + 'ant-api03-' + rnd('a', 93) + 'AA'}";\n`,
+    'dist/openai-proj.js': `const k = "${'sk-' + 'proj-' + rnd('b', 74) + marker + rnd('c', 74)}";\n`,
+    'dist/openai-legacy.js': `const k = "${'sk-' + rnd('d', 20, 'hex') + marker + rnd('e', 20, 'hex')}";\n`,
+    'dist/db.js': `const url = "${'postgres' + '://app_user:Zq8!vR2wLx@db.internal.corp:5432/prod'}";\n`,
+    'config/redis.json': `{"url": "${'redis' + '://:k9%40Tm2xQ@cache.internal:6379'}"}\n`,
+    'dist/client.js': `fetch(u, { headers: { "Authorization": "Basic ${b64('deploy:Vt7mQ2xLp9')}" } });\n`,
+  };
+  const r = check(pack('cred-shapes', leaks));
+  assert.equal(r.code, 1);
+  assert.deepEqual(r.report.findings.map((f) => `${f.rule} ${f.path}`).sort(), Object.keys(leaks).map((p) => `secret-token ${p}`).sort());
+  for (const f of r.report.findings) {
+    assert.match(f.detail, /^[A-Za-z /]+ \(\d+ chars\)$/, f.detail);
+    assert.doesNotMatch(f.detail, /app_user|Zq8|internal|deploy|k9%40|sk-/);
+  }
+  const clean = [
+    'postgres' + '://user:password@localhost/db',
+    'postgres' + '://postgres:postgres@localhost:5432/db',
+    'amqp' + '://guest:guest@rabbit:5672',
+    'mongodb+srv' + '://admin:<password>@cluster0.mongodb.net',
+    'https' + '://user:${TOKEN}@github.com/org/repo.git',
+    'redis' + '://:changeme@cache:6379',
+    'postgres' + '://app:S3cretVal9@db.example.com/x',
+    'https' + '://u:Q7vLm2Rx@api.service.test/v1',
+    'mysql' + '://root:xxxxxxxx@db:3306',
+    'https' + '://user:p%40ss@host',
+    'redis' + '://:authpassword@127.0.0.1',
+    'redis' + '://alice:foobared@awesome.redis.server',
+    'amqp' + '://user:passw%23rd@host',
+    'Authorization: Basic ' + b64('Aladdin:open sesame'),
+    'Authorization: Basic ' + b64('user:password'),
+    'headers.Authorization = "Basic " + btoa(user + ":" + pass)',
+    'Authorization: Bearer ' + rnd('f', 40),
+    'x-api-key: ' + rnd('g', 40),
+    'sk-' + 'ant-api03-' + 'x'.repeat(93) + 'AA',
+  ];
+  const ok = check(pack('cred-placeholders', { 'README.md': clean.join('\n') + '\n', 'index.js': clean.map((c) => JSON.stringify(c)).join(';\n') + '\n' }));
+  assert.equal(ok.code, 0, JSON.stringify(ok.report?.findings));
+});
+
+test('secret-token patterns stay linear on adversarial input', () => {
+  const big = ('postgres' + '://' + 'a'.repeat(127) + ':' + 'b'.repeat(255)).repeat(8000) + ('Authorization: Basic ' + 'A'.repeat(1023)).repeat(1000);
+  const t = Date.now();
+  const r = check(pack('cred-redos', { 'dist/big.js': big }));
+  assert.equal(r.code, 0, JSON.stringify(r.report?.findings));
+  assert.ok(Date.now() - t < 10000, `took ${Date.now() - t} ms`);
+});
+
 test('extra credential files and build artifacts fail under their own rules', () => {
   const creds = ['.git-credentials', '.netrc', '.pypirc', '.aws/credentials', 'keys/release.jks', 'android.keystore'];
   const artifacts = ['tsconfig.tsbuildinfo', 'coverage/lcov.info', '.nyc_output/out.json', 'dist/meta.json'];

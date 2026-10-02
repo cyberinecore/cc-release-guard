@@ -85,7 +85,7 @@ For a workspace, pack every package into `out/` (`npm pack --workspaces --pack-d
 Or use the composite action from this repository, which runs the CLI from its own checkout (no npm install) and writes a markdown report to the job summary:
 
 ```yaml
-- uses: cyberinecore/cc-release-guard@main
+- uses: cyberinecore/cc-release-guard@v0
   id: shipsafe
   with:
     working-directory: .
@@ -93,7 +93,7 @@ Or use the composite action from this repository, which runs the CLI from its ow
 
 Then publish each path the action lists in its `tarballs` output.
 
-Inputs: `tarballs` (a glob such as `out/*.tgz`; empty packs `working-directory` with `npm pack`), `working-directory`, `summary` (`true`/`false`). Output `tarballs` lists the absolute paths that passed, so the publish step uploads exactly those files. Pin a commit SHA instead of `@main` until a versioned tag exists.
+Inputs: `tarballs` (a glob such as `out/*.tgz`; empty packs `working-directory` with `npm pack`), `working-directory`, `summary` (`true`/`false`). Output `tarballs` lists the absolute paths that passed, so the publish step uploads exactly those files. `@v0` follows the latest 0.x release; pin `@v0.1.0`, or a commit SHA, to freeze the exact gate. Each tag runs the same CLI as the npm version of the same number.
 
 To see the result in review, append `--format markdown` output to the job summary and upload `--format sarif` output with `github/codeql-action/upload-sarif` (needs `security-events: write`); this repo's `.github/workflows/ci.yml` does both.
 

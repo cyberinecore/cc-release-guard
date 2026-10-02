@@ -45,6 +45,6 @@ Archive parsing is hand-written to stay zero-dependency: tar (gzip via `node:zli
 ## Plugin constraints
 
 - No top-level `bin/`: claude.ai and Cowork refuse a plugin that has one. The CLI lives in `cli/`.
-- `plugin.json` pins `version`; bump it on every release, together with `cli/package.json` and `VERSION` in `cli/shipsafe.mjs`.
+- `plugin.json` pins `version`; bump it on every release, together with `cli/package.json` and `VERSION` in `cli/shipsafe.mjs`. After the npm publish, tag the commit whose `cli/` files match the published tarball as `vX.Y.Z` and move the major tag (`v0`) there with `git tag -f -a` and `git push -f origin v0`: the README tells Action users to pin `@v0`, so each tag must run the same CLI as the npm version of that number.
 - Skills are `release` (model-invocable; auto-triggers on publish intent), `init`, `check`, `verify`, `incident` (slash-only) and `help` (router, fires only with a shipsafe or releaseguard anchor), following the Cyberine ecosystem convention of `/<plugin>:<verb>`. The `release` skill stops before the publish command: the human runs it and types the OTP. Never add token storage or reading of token values.
 - Tests build real fixtures with `npm pack` in a temp dir; keep them that way rather than hand-crafting tar bytes.

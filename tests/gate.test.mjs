@@ -774,8 +774,141 @@ test('NuGet, RubyGems and Maven uploads are gated on the named file', () => {
   assert.match(hook(`gem push ${gem}`).permissionDecisionReason, /sensitive-file/);
   assert.match(hook('gem push').permissionDecisionReason, /names no gem/);
   assert.match(hook(`mvn deploy:deploy-file -Dfile=${nu} -DrepositoryId=x -Durl=http://127.0.0.1:9/repo`).permissionDecisionReason, /secret-token/);
-  assert.equal(hook('mvn deploy'), null);
+  assert.match(hook('mvn deploy').permissionDecisionReason, /names no artifact/);
+  assert.equal(hook('mvn package'), null);
   assert.equal(hook('dotnet build'), null);
+});
+
+test('new credential names and data files fail under sensitive-file and data-file', () => {
+  const sensitive = ['.dev.vars', '.dev.vars.production', 'infra/terraform.tfstate', 'infra/terraform.tfstate.backup', 'infra/prod.tfvars', 'kubeconfig', '.kube/config', '.docker/config.json', '.ssh/known_hosts', '.mcp.json', '.claude/settings.local.json'];
+  const data = ['fixtures/dev.sqlite', 'fixtures/dev.sqlite3', 'fixtures/app.db', 'fixtures/backup.dump', 'fixtures/seed.sql'];
+  const clean = ['infra/prod.tfvars.example', 'migrations/001_schema.sql', 'docs/mcp.json', '.claude/settings.json'];
+  const files = Object.fromEntries([...sensitive, ...data, ...clean].map((p) => [p, 'x\n']));
+  files['fixtures/seed.sql'] = 'INSERT INTO users (id, email) VALUES (1, \'a@example.com\');\n';
+  files['migrations/001_schema.sql'] = 'CREATE TABLE users (id int, email text);\nALTER TABLE users ADD COLUMN name text;\n';
+  const r = check(pack('data-files', files, { files: ['**/*', '.*', '.kube/*', '.docker/*', '.ssh/*', '.claude/*'] }));
+  assert.equal(r.code, 1);
+  const byPath = Object.fromEntries(r.report.findings.map((f) => [f.path, f.rule]));
+  for (const p of sensitive) assert.equal(byPath[p], 'sensitive-file', p);
+  for (const p of data) assert.equal(byPath[p], 'data-file', p);
+  for (const p of clean) assert.equal(byPath[p], undefined, p);
+  const allowed = check(pack('data-allowed', { 'fixtures/app.db': 'x\n', 'index.js': 'x\n' }, { files: ['**/*'], shipsafe: { allow: [{ rule: 'data-file', path: 'fixtures/*', reason: 'empty sqlite fixture used by the test helper' }] } }));
+  assert.equal(allowed.code, 0, JSON.stringify(allowed.report?.findings));
+  assert.equal(allowed.report.findings[0].allowed, true);
+});
+
+test('GitLab, SendGrid and Azure storage tokens fail; placeholders and examples pass', () => {
+  const rnd = (seed, n, alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789') => {
+    let s = '';
+    for (let i = 0; s.length < n; i++) for (const b of createHash('sha512').update(`${seed}${i}`).digest()) s += alphabet[b % alphabet.length];
+    return s.slice(0, n);
+  };
+  const real = {
+    'dist/gitlab.js': `const t = "${'gl' + 'pat-'}${rnd('gl', 20)}";\n`,
+    'dist/gitlab-routable.js': `const t = "${'gl' + 'pat-'}${rnd('glr', 37)}";\n`,
+    'dist/sendgrid.js': `const t = "${'S' + 'G.'}${rnd('sg1', 22)}.${rnd('sg2', 43)}";\n`,
+    'dist/azure.js': `const c = "DefaultEndpointsProtocol=https;AccountName=probe;${'Account' + 'Key='}${rnd('az', 86, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/')}==;EndpointSuffix=core.windows.net";\n`,
+  };
+  const r = check(pack('new-secrets', real));
+  assert.equal(r.code, 1);
+  assert.deepEqual(rules(r.report), ['secret-token']);
+  assert.equal(r.report.findings.length, Object.keys(real).length);
+  assert.match(r.report.findings.find((f) => f.path === 'dist/gitlab.js').detail, /GitLab token gl(?:pat-)\.\.\. \(26 chars\)/);
+  assert.match(r.report.findings.find((f) => f.path === 'dist/sendgrid.js').detail, /SendGrid API key SG\.\.\.\. \(69 chars\)/);
+  assert.match(r.report.findings.find((f) => f.path === 'dist/azure.js').detail, /Azure storage account key AccountKey=\.\.\. \(99 chars\)/);
+  for (const f of r.report.findings) for (const v of Object.values(real)) assert.ok(!f.detail.includes(v.slice(12, 40)), 'detail must be redacted');
+  const placeholders = {
+    'dist/a.js': `"${'gl' + 'pat-'}${'x'.repeat(20)}" "${'gl' + 'pat-'}${'X'.repeat(26)}" "${'gl' + 'pat-'}short"\n`,
+    'dist/b.js': `"${'S' + 'G.'}${'x'.repeat(22)}.${'y'.repeat(43)}" "SG.example.key"\n`,
+    'dist/c.js': `"${'Account' + 'Key='}${'A'.repeat(86)}==" "AccountKey=<your-account-key>" "AccountKey=${rnd('short', 40)}=="\n`,
+    'dist/d.js': `"${'S' + 'G.'}${rnd('ex1', 22)}.${rnd('ex2', 43 - 7)}EXAMPLE"\n`,
+  };
+  assert.equal(check(pack('new-secrets-placeholders', placeholders)).code, 0);
+});
+
+test('vsce and ovsx publish are gated on a named .vsix and asked about otherwise', () => {
+  const vsixTree = (extra) => ({
+    '[Content_Types].xml': '<Types/>', 'extension.vsixmanifest': '<PackageManifest/>',
+    'extension/package.json': JSON.stringify({ name: 'ext', publisher: 'probe', version: '0.0.2', main: './out/extension.js' }),
+    'extension/out/extension.js': 'exports.activate=()=>{};\n',
+    ...extra,
+  });
+  const good = zipDir('vsce-good.vsix', vsixTree({}));
+  const bad = zipDir('vsce-bad.vsix', vsixTree({ 'extension/out/extension.js.map': '{}' }));
+  assert.equal(hook(`vsce publish --packagePath ${good}`), null);
+  assert.equal(hook(`ovsx publish ${good} -p token`), null);
+  assert.match(hook(`vsce publish -i ${bad}`).permissionDecisionReason, /source-map/);
+  assert.match(hook(`ovsx publish --packagePath ${bad}`).permissionDecisionReason, /source-map/);
+  assert.match(hook('vsce publish').permissionDecisionReason, /vsce package/);
+  assert.match(hook(via('npx', 'ovsx publish')).permissionDecisionReason, /ovsx package/);
+  assert.equal(hook('vsce package'), null);
+});
+
+test('jsr and deno publish gate the working directory with the leak rules, honoring .gitignore and publish.exclude', () => {
+  const dir = join(root, 'jsr-pkg');
+  mkdirSync(join(dir, 'build'), { recursive: true });
+  mkdirSync(join(dir, 'fixtures'), { recursive: true });
+  mkdirSync(join(dir, '.git'), { recursive: true });
+  writeFileSync(join(dir, 'deno.json'), JSON.stringify({ name: '@probe/pkg', version: '0.1.0', exports: './mod.ts', publish: { exclude: ['fixtures/'] } }));
+  writeFileSync(join(dir, 'mod.ts'), 'export const a = 1;\n');
+  writeFileSync(join(dir, '.gitignore'), '.env\nbuild/\n');
+  writeFileSync(join(dir, '.env'), 'TOKEN=1\n');
+  writeFileSync(join(dir, '.git/config'), '[core]\n');
+  writeFileSync(join(dir, 'build/mod.js.map'), '{}');
+  writeFileSync(join(dir, 'fixtures/app.js.map'), '{}');
+  assert.equal(hook('jsr publish', dir), null, 'TypeScript source, gitignored and excluded paths are not findings');
+  assert.equal(hook('deno publish --allow-dirty', dir), null);
+  writeFileSync(join(dir, 'mod.js.map'), '{}');
+  const ask = hook('deno publish', dir);
+  assert.match(ask.permissionDecisionReason, /only the leak rules apply/);
+  assert.match(ask.permissionDecisionReason, /source-map\s+mod\.js\.map/);
+  assert.doesNotMatch(ask.permissionDecisionReason, /typescript-source|\.env|fixtures/);
+  assert.equal(hook('jsr publish --dry-run', dir), null);
+});
+
+test('scripts and Makefile recipes that publish are asked about with a via prefix', () => {
+  const dir = join(root, 'scripted');
+  mkdirSync(join(dir, 'dist'), { recursive: true });
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'scripted', version: '1.0.0', scripts: { build: 'echo build', release: `npm publish ${good}`, 'release:leaky': `npm publish ${leaky}`, ship: 'npm run release:leaky', prepublishOnly: 'npm run build', postpublish: 'echo done' } }));
+  writeFileSync(join(dir, 'Makefile'), `TGZ = ${leaky}\n\nall: build\n\nbuild:\n\t@echo build\n\npublish: build\n\tnpm publish $(TGZ)\n\nrelease:\n\t$(MAKE) publish\n\nbroken\n`);
+  assert.equal(hook('npm run release', dir), null, 'a script publishing a clean tarball passes');
+  assert.match(hook('npm run release:leaky', dir).permissionDecisionReason, /^shipsafe:.*\nvia npm run release:leaky: shipsafe check failed/);
+  assert.match(hook('npm run ship', dir).permissionDecisionReason, /via npm run ship > npm run release:leaky: /);
+  assert.match(hook('make publish', dir).permissionDecisionReason, /via make publish: shipsafe check failed/);
+  assert.match(hook('make release', dir).permissionDecisionReason, /via make release > make publish: /);
+  assert.equal(hook('make', dir), null);
+  assert.equal(hook('make build', dir), null);
+  assert.equal(hook('npm run build', dir), null);
+  assert.match(hook('npm publish', dir).permissionDecisionReason, /without a tarball/);
+  // one nested level only: ship -> release:leaky -> (the publish itself) is seen, a third hop is not
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'scripted', version: '1.0.0', scripts: { a: 'npm run b', b: 'npm run c', c: 'npm publish' } }));
+  assert.match(hook('npm run b', dir).permissionDecisionReason, /via npm run b > npm run c/);
+  assert.equal(hook('npm run a', dir), null);
+});
+
+test('askOnTagPush asks before tag pushes that trigger a release workflow', () => {
+  const dir = join(root, 'tagged');
+  mkdirSync(join(dir, '.github/workflows'), { recursive: true });
+  mkdirSync(join(dir, '.git/refs/tags'), { recursive: true });
+  mkdirSync(join(dir, '.claude'), { recursive: true });
+  writeFileSync(join(dir, '.git/HEAD'), 'ref: refs/heads/main\n');
+  writeFileSync(join(dir, '.git/packed-refs'), '# pack-refs with: peeled fully-peeled sorted\n0000000000000000000000000000000000000000 refs/tags/1.0.0\n');
+  writeFileSync(join(dir, '.git/refs/tags/v2.0.0'), '0000000000000000000000000000000000000000\n');
+  writeFileSync(join(dir, '.github/workflows/ci.yml'), 'on:\n  push:\n    branches: [main]\njobs: {}\n');
+  writeFileSync(join(dir, '.github/workflows/release.yml'), "on:\n  push:\n    tags: ['v*']\njobs: {}\n");
+  assert.equal(hook('git push --tags', dir), null, 'off by default');
+  writeFileSync(join(dir, '.claude/shipsafe.json'), JSON.stringify({ askOnTagPush: true }));
+  assert.match(hook('git push --tags', dir).permissionDecisionReason, /release\.yml runs on tag pushes/);
+  assert.match(hook('git push origin v2.0.0', dir).permissionDecisionReason, /pushes tag v2\.0\.0; \.github\/workflows\/release\.yml/);
+  assert.match(hook('git push origin tag v9.9.9', dir).permissionDecisionReason, /pushes tag v9\.9\.9/);
+  assert.equal(hook('git push origin 1.0.0', dir), null, 'a tag no workflow listens for');
+  assert.equal(hook('git push origin main', dir), null);
+  assert.equal(hook('git push', dir), null);
+  assert.equal(hook('git push --tags -n', dir), null);
+  assert.equal(hook('git push origin :v2.0.0', dir), null);
+  writeFileSync(join(dir, '.github/workflows/release.yml'), 'on: [push]\njobs: {}\n');
+  assert.equal(hook('git push origin v2.0.0', dir), null, 'no tags filter, no ask for a named ref');
+  assert.match(hook('git push --follow-tags', dir).permissionDecisionReason, /no workflow in \.github\/workflows was found/);
 });
 
 function helmPackage(name, tree) {

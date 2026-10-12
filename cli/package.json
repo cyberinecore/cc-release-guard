@@ -1,6 +1,6 @@
 {
   "name": "@cyberinecore/shipsafe",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-dependency release gate: fails an npm tarball, wheel, crate, .vsix, Helm chart or image archive that ships source maps, embedded sources, source or test paths, credential files or secret tokens.",
   "type": "module",
   "bin": {

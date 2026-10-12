@@ -6,7 +6,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync, inflateRawSync } from 'node:zlib';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
 const CONFIG_FIELDS = ['maxFileBytes', 'growthFactor', 'allow'];
@@ -47,6 +47,7 @@ const RULES = {
   'wheel-record': 'wheel RECORD does not match the files it ships',
   'vcs-dir': 'VCS, virtualenv, cache or node_modules directory swept into the package',
   'archive-integrity': 'link, device or duplicate entry the scan cannot vouch for',
+  'data-file': 'database file or data dump (sqlite, .db, .dump, a .sql file holding rows)',
 };
 const RULE_NAMES = Object.keys(RULES).join(', ');
 
@@ -71,6 +72,9 @@ const SECRET_PATTERNS = [
   ['npm token', /\bnpm_[A-Za-z0-9]{36}\b/g, 4],
   ['Stripe live key', /\b[rs]k_live_[A-Za-z0-9]{20,247}\b/g, 8],
   ['Slack token', /\bxox[abpr]-[A-Za-z0-9-]{10,250}/g, 5],
+  ['GitLab token', /(?<![\w-])glpat-[A-Za-z0-9_-]{20,400}(?![\w-])/g, 6, realKey],
+  ['SendGrid API key', /(?<![\w.-])SG\.[\w-]{22}\.[\w-]{43}(?![\w-])/g, 3, realKey],
+  ['Azure storage account key', /\bAccountKey=[A-Za-z0-9+/]{86}==/g, 11, realKey],
   ['private key block', /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/g, 10],
   ['Anthropic API key', /(?<![\w-])sk-ant-(?:api03|admin01)-[\w-]{93}AA(?![\w-])/g, 0, realKey],
   ['OpenAI API key', /(?<![\w-])sk-(?:proj|svcacct|admin)-(?:[\w-]{74}|[\w-]{58})T3BlbkFJ(?:[\w-]{74}|[\w-]{58})(?![\w-])/g, 0, realKey],
@@ -381,7 +385,7 @@ function missingEntryPoints(pkg, present) {
   return missing;
 }
 
-const DIR_RULES = new Set(['source-map', 'sources-content', 'inline-source-map', 'remote-source-map', 'sensitive-file', 'secret-token', 'bucket-url', 'build-artifact', 'archive-integrity']);
+const DIR_RULES = new Set(['source-map', 'sources-content', 'inline-source-map', 'remote-source-map', 'sensitive-file', 'secret-token', 'bucket-url', 'build-artifact', 'archive-integrity', 'data-file']);
 const SKIP_DIRS = new Set(['node_modules']);
 
 function nearestPackageJson(dir) {
@@ -392,7 +396,7 @@ function nearestPackageJson(dir) {
   }
 }
 
-export function checkDirectory(dir) {
+export function checkDirectory(dir, { exclude } = {}) {
   const root = resolve(dir);
   if (!existsSync(root) || !statSync(root).isDirectory()) throw new GuardError(`not a directory: ${root}`);
   const pkgPath = nearestPackageJson(root);
@@ -422,6 +426,7 @@ export function checkDirectory(dir) {
       const full = join(abs, name);
       const rel = relative(root, full).split('\\').join('/');
       const st = lstatSync(full);
+      if (exclude && exclude(rel, st.isDirectory())) continue;
       if (st.isSymbolicLink()) { record(rel, [['archive-integrity', 'symlink; the deploy may upload what it points at, which was not scanned']]); continue; }
       if (st.isDirectory()) { if (!SKIP_DIRS.has(name)) walk(full); continue; }
       if (!st.isFile()) continue;
@@ -431,12 +436,22 @@ export function checkDirectory(dir) {
       const data = readFileSync(full);
       const hits = [...scanPath(rel), ...scanContent(data)];
       if (isMetafile(rel, data)) hits.push(['build-artifact', 'esbuild metafile']);
+      if (isSqlDump(rel, data)) hits.push(['data-file', 'SQL file holding rows']);
       record(rel, hits);
     }
   };
   walk(root);
   for (const a of config.allow) if (!a.used) warnings.push(`unused allow entry: ${a.rule} ${a.path}`);
   return { version: VERSION, kind: 'directory', file: root, package: pkgPath ? `config ${pkgPath}` : 'no package.json config', files: count, unpackedBytes: bytes, pass: findings.every((f) => f.allowed), findings, warnings };
+}
+
+const SENSITIVE_NAMES = new Set(['.npmrc', '.git-credentials', '.netrc', '_netrc', '.pypirc', '.dev.vars', 'kubeconfig', '.mcp.json']);
+const SQL_ROWS = /^\s*(INSERT\s+INTO|COPY\s+[\w."]+.*FROM\s+stdin)\b|^--\s*(PostgreSQL|MySQL|MariaDB)\s+(database\s+)?dump/im;
+
+// A .sql file is data only when it carries rows: schema migrations ship legitimately.
+function isSqlDump(path, data) {
+  if (!/\.sql$/i.test(path)) return false;
+  return SQL_ROWS.test(data.toString('utf8', 0, Math.min(data.length, 65536)));
 }
 
 function scanPath(path) {
@@ -448,7 +463,9 @@ function scanPath(path) {
   if (/\.(ts|tsx|mts|cts)$/i.test(base) && !/\.d\.(ts|mts|cts)$/i.test(base)) found.push(['typescript-source', '']);
   if (dirs.includes('src')) found.push(['source-dir', '']);
   if (dirs.some((d) => ['test', 'tests', '__tests__', '__mocks__', '__fixtures__'].includes(d)) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(base)) found.push(['test-path', '']);
-  if ((/^\.env(\..+)?$/.test(base) && !/^\.env\.(example|sample|template)$/.test(base)) || ['.npmrc', '.git-credentials', '.netrc', '_netrc', '.pypirc'].includes(base) || (dirs.includes('.aws') && ['credentials', 'config'].includes(base)) || /\.(jks|keystore)$/i.test(base) || /\.(pem|key|p12|pfx)$/i.test(base) || /^id_(rsa|ed25519|ecdsa)/.test(base) || dirs.includes('.git')) found.push(['sensitive-file', '']);
+  if ((/^\.env(\..+)?$/.test(base) && !/^\.env\.(example|sample|template)$/.test(base)) || SENSITIVE_NAMES.has(base) || /^\.dev\.vars\./.test(base) || (dirs.includes('.aws') && ['credentials', 'config'].includes(base)) || /\.(jks|keystore)$/i.test(base) || /\.(pem|key|p12|pfx)$/i.test(base) || /^id_(rsa|ed25519|ecdsa)/.test(base) || dirs.includes('.git')
+    || /\.tfstate(\.backup)?$/i.test(base) || /\.tfvars$/i.test(base) || (dirs.includes('.kube') && base === 'config') || (dirs.includes('.docker') && base === 'config.json') || dirs.includes('.ssh') || (dirs[dirs.length - 1] === '.claude' && base === 'settings.local.json')) found.push(['sensitive-file', '']);
+  if (/\.(sqlite3?|db|dump)$/i.test(base)) found.push(['data-file', '']);
   if (/\.tsbuildinfo$/i.test(base) || dirs.includes('coverage') || dirs.includes('.nyc_output')) found.push(['build-artifact', '']);
   return found;
 }
@@ -991,6 +1008,7 @@ export function checkTarball(file, label, { asset = false } = {}) {
     }
     if (kind !== 'image' && !expanded?.has(f.path) && NESTED_ARCHIVE.test(f.path) && !(/\.asar$/i.test(f.path) && isAsar(f.data))) warnings.push(`nested archive ${f.path} was not scanned inside`);
     if (isMetafile(f.path, f.data)) hits.push(['build-artifact', 'esbuild metafile']);
+    if (isSqlDump(f.path, f.data)) hits.push(['data-file', 'SQL file holding rows']);
     if (f.size > config.maxFileBytes) hits.push(['file-size', `${f.size} bytes > ${config.maxFileBytes}`]);
     record(f.path, hits);
   }
@@ -1546,8 +1564,12 @@ function findDeploy(prog, args, cwd) {
     return fromConfig ? { manager, dirs: [at(base, fromConfig)] } : { manager, error: `\`${manager}\` names no output directory and no pages_build_output_dir was found. Name it: \`${manager} dist\`.` };
   }
   if (prog === 'vercel') {
-    if (!args.includes('--prebuilt')) return null;
     if (pos.length && VERCEL_OTHER.has(pos[0])) return null;
+    if (args.some((a) => SAFE_FLAGS.has(a))) return null;
+    if (!args.includes('--prebuilt')) {
+      const r = remoteBuild(`vercel${args.includes('--prod') ? ' --prod' : pos[0] === 'deploy' ? ' deploy' : ''}`, cwd);
+      return { ...r, error: `${r.error} Build locally with \`vercel build\`, run \`shipsafe check-dir .vercel/output/static\`, then deploy exactly that with \`vercel deploy --prebuilt\`.` };
+    }
     const project = pos[0] === 'deploy' ? pos[1] : pos[0];
     const base = at(optionValue(args, '--cwd') ? at(cwd, optionValue(args, '--cwd')) : cwd, project ?? '.');
     return { manager: 'vercel deploy --prebuilt', dirs: [join(base, '.vercel/output/static')] };
@@ -1733,7 +1755,7 @@ function findImagePush(prog, args) {
 }
 
 // DECISION: the docker push opt-in is .claude/shipsafe.json at or above the cwd, not a package.json key, because image repos are often not JS and packed config must describe only the artifact.
-function dockerOptIn(cwd) {
+function localOptIn(cwd, key) {
   for (let d = resolve(cwd); ; d = dirname(d)) {
     const p = join(d, '.claude', 'shipsafe.json');
     if (existsSync(p)) {
@@ -1741,16 +1763,16 @@ function dockerOptIn(cwd) {
       try {
         json = JSON.parse(readFileSync(p, 'utf8'));
       } catch (e) {
-        return { error: `${p} is not valid JSON (${e.message}); fix it or remove askOnDockerPush.` };
+        return { error: `${p} is not valid JSON (${e.message}); fix it or remove ${key}.` };
       }
-      return { on: json?.askOnDockerPush === true, source: p };
+      return { on: json?.[key] === true, source: p };
     }
     if (dirname(d) === d) return { on: false };
   }
 }
 
 function evaluateImagePush(p) {
-  const opt = dockerOptIn(p.cwd);
+  const opt = localOptIn(p.cwd, 'askOnDockerPush');
   if (opt.error) return opt.error;
   if (!opt.on) return null;
   const ref = p.ref && !/[$`]/.test(p.ref) ? p.ref : '<image>';
@@ -1797,6 +1819,429 @@ function stripRunnerOpts(args, ctx) {
   return args.slice(i);
 }
 
+
+// --- Script wrappers: package.json scripts and Makefile recipes, one nested level (D: via-prefixed asks).
+const MAX_SCRIPT_DEPTH = 2;
+const PUBLISH_LIFECYCLE = ['prepublishOnly', 'prepublish', 'prepack', 'postpack', 'publish', 'postpublish'];
+const MAKE_VALUE_OPTS = new Set(['-I', '--include-dir', '-o', '--old-file', '--assume-old', '-W', '--what-if', '--new-file', '--assume-new', '-E', '--eval', '-f', '--file', '--makefile', '-C', '--directory']);
+
+function scanScript(body, dir, ctx, label) {
+  if ((ctx.scriptDepth ?? 0) >= MAX_SCRIPT_DEPTH || typeof body !== 'string' || !body.trim()) return;
+  const n = ctx.out.length;
+  scanCommand(body, dir, { ...ctx, depth: ctx.depth + 1, scriptDepth: (ctx.scriptDepth ?? 0) + 1 });
+  for (let i = n; i < ctx.out.length; i++) ctx.out[i].via = ctx.out[i].via ? `${label} > ${ctx.out[i].via}` : label;
+}
+
+function packageScripts(dir) {
+  const pkgPath = nearestPackageJson(resolve(dir));
+  const scripts = pkgPath ? readJsonFile(pkgPath)?.scripts : null;
+  return scripts && typeof scripts === 'object' ? { scripts, dir: dirname(pkgPath) } : null;
+}
+
+function runScript(prog, args, cwd, ctx) {
+  let i = 0;
+  while (i < args.length && args[i].startsWith('-') && args[i] !== '--') i += !args[i].includes('=') && VALUE_OPTS.has(args[i]) ? 2 : 1;
+  const name = args[i];
+  if (!name || name === '--' || /[$`]/.test(name)) return;
+  const extra = args[i + 1] === '--' ? args.slice(i + 2) : [];
+  const found = packageScripts(cwd);
+  if (!found) return;
+  const label = `${prog} run ${name}`;
+  for (const key of [`pre${name}`, name, `post${name}`]) {
+    const body = found.scripts[key];
+    if (typeof body !== 'string') continue;
+    scanScript(key === name && extra.length ? `${body} ${extra.join(' ')}` : body, found.dir, ctx, label);
+  }
+}
+
+// `npm publish` of a working tree also runs the package's publish lifecycle scripts.
+function publishLifecycle(prog, dir, ctx) {
+  const found = packageScripts(dir);
+  if (!found) return;
+  for (const key of PUBLISH_LIFECYCLE) scanScript(found.scripts[key], found.dir, ctx, `${prog} publish ${key} script`);
+}
+
+function parseMakefile(text) {
+  const vars = new Map();
+  const targets = new Map();
+  let first = null;
+  let current = null;
+  for (const raw of text.replace(/\\\r?\n[ \t]*/g, ' ').split(/\r?\n/)) {
+    if (raw.startsWith('\t')) {
+      if (current) for (const t of current) targets.set(t, `${targets.get(t) ?? ''}${raw.slice(1).replace(/^[ \t]*[@+-]+/, '')}\n`);
+      continue;
+    }
+    const line = raw.replace(/(^|\s)#.*$/, '').trimEnd();
+    if (!line.trim()) continue;
+    current = null;
+    if (/^\s*(ifeq|ifneq|ifdef|ifndef|else|endif|include|-include|sinclude|define|endef|export|unexport|override|vpath)\b/.test(line)) continue;
+    const v = /^([A-Za-z_][\w.]*)\s*(?:[:?+!]|::)?=\s*(.*)$/.exec(line);
+    if (v) { vars.set(v[1], v[2]); continue; }
+    const rule = /^([^:=\t][^:=]*?)\s*::?\s*(.*)$/.exec(line);
+    if (!rule || rule[2].includes('=')) continue;
+    const names = rule[1].trim().split(/\s+/).filter((n) => n && !n.startsWith('.') && !/[%$]/.test(n));
+    current = names;
+    if (!first && names.length) first = names[0];
+    for (const n of names) if (!targets.has(n)) targets.set(n, '');
+  }
+  const expand = (str, depth) => str.replace(/\$[({]([A-Za-z_][\w.]*)[)}]/g, (m, name) => {
+    if (name === 'MAKE') return 'make';
+    const value = vars.get(name);
+    return value === undefined ? `$${name}` : depth < 4 ? expand(value, depth + 1) : value;
+  }).replace(/\$\$/g, '$');
+  for (const [k, v] of targets) targets.set(k, expand(v, 0));
+  return { targets, first };
+}
+
+function runMake(args, cwd, ctx) {
+  let dir = cwd;
+  let file = null;
+  const targets = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '-C' || a === '--directory') { if (args[i + 1]) dir = expandPath(args[++i], dir); continue; }
+    if (a.startsWith('--directory=')) { dir = expandPath(a.slice(12), dir); continue; }
+    if (a === '-f' || a === '--file' || a === '--makefile') { file = args[++i]; continue; }
+    if (/^--(file|makefile)=/.test(a)) { file = a.slice(a.indexOf('=') + 1); continue; }
+    if (a === '-j' || a === '--jobs' || a === '-l' || a === '--load-average') { if (/^\d+(\.\d+)?$/.test(args[i + 1] ?? '')) i++; continue; }
+    if (a.startsWith('-')) { if (MAKE_VALUE_OPTS.has(a)) i++; continue; }
+    if (/^[A-Za-z_][\w.]*\s*(?:[:?+!]|::)?=/.test(a)) continue;
+    targets.push(a);
+  }
+  if (/[$`]/.test(dir) || (file && /[$`]/.test(file))) return;
+  const mf = file ? expandPath(file, dir) : ['GNUmakefile', 'makefile', 'Makefile'].map((n) => join(dir, n)).find((f) => existsSync(f));
+  if (!mf || !existsSync(mf) || !statSync(mf).isFile()) return;
+  let parsed;
+  try {
+    parsed = parseMakefile(readFileSync(mf, 'utf8'));
+  } catch {
+    return;
+  }
+  const names = targets.length ? targets : parsed.first ? [parsed.first] : [];
+  for (const t of names) {
+    const recipe = parsed.targets.get(t);
+    if (!recipe) continue;
+    for (const line of recipe.split('\n')) scanScript(line, dir, ctx, `make ${t}`);
+  }
+}
+
+// --- Bucket and server uploads: the local source directory is gated like `check-dir`.
+const AWS_VALUE_OPTS = new Set(['--profile', '--region', '--output', '--endpoint-url', '--ca-bundle', '--cli-read-timeout', '--cli-connect-timeout', '--query', '--color', '--cli-binary-format',
+  '--exclude', '--include', '--acl', '--cache-control', '--content-type', '--content-disposition', '--content-encoding', '--content-language', '--expires', '--metadata', '--metadata-directive',
+  '--sse', '--sse-c', '--sse-c-key', '--sse-kms-key-id', '--sse-c-copy-source', '--sse-c-copy-source-key', '--storage-class', '--grants', '--website-redirect', '--source-region', '--expected-size',
+  '--page-size', '--request-payer', '--checksum-mode', '--checksum-algorithm', '--delete-exclude']);
+const GSUTIL_VALUE_OPTS = new Set(['-o', '-i', '-u', '-h', '-a', '-x', '-j', '-s', '-z', '-D']);
+const GCLOUD_VALUE_OPTS = new Set(['--project', '--account', '--configuration', '--impersonate-service-account', '--billing-project', '--format', '--verbosity', '--flags-file', '--access-token-file',
+  '--additional-headers', '--content-type', '--cache-control', '--content-disposition', '--content-encoding', '--content-language', '--custom-time', '--exclude', '--storage-class', '--canned-acl',
+  '--predefined-acl', '--predefined-default-object-acl', '--region', '--platform', '--image', '--source', '--service-account', '--memory', '--cpu', '--port', '--timeout', '--concurrency',
+  '--set-env-vars', '--update-env-vars', '--env-vars-file', '--set-secrets', '--ingress', '--tag', '--revision-suffix', '--vpc-connector', '--vpc-egress', '--min-instances', '--max-instances',
+  '--execution-environment', '--version', '--bucket', '--runtime', '--entry-point', '--trigger-topic', '--trigger-bucket', '--trigger-event', '--trigger-event-filters']);
+const AZCOPY_VALUE_OPTS = new Set(['--exclude-pattern', '--include-pattern', '--exclude-path', '--include-path', '--exclude-regex', '--include-regex', '--include-after', '--include-before',
+  '--block-size-mb', '--log-level', '--cap-mbps', '--from-to', '--metadata', '--content-type', '--content-encoding', '--content-disposition', '--content-language', '--cache-control',
+  '--blob-type', '--block-blob-tier', '--page-blob-tier', '--blob-tags', '--list-of-files', '--list-of-versions', '--output-type', '--output-level', '--trusted-microsoft-suffixes', '--delete-destination',
+  '--put-md5', '--check-md5', '--cpk-by-name', '--cpk-by-value']);
+const RCLONE_VALUE_OPTS = new Set(['--config', '--transfers', '--checkers', '--exclude', '--include', '--filter', '--exclude-from', '--include-from', '--filter-from', '--files-from', '--bwlimit',
+  '--log-file', '--log-level', '--stats', '--max-age', '--min-age', '--max-size', '--min-size', '--max-depth', '--backup-dir', '--suffix', '--order-by', '--retries', '--low-level-retries',
+  '--timeout', '--contimeout', '--buffer-size', '--cache-dir', '--header', '--header-upload', '--user-agent', '--compare-dest', '--copy-dest', '--metadata-set', '--track-renames-strategy', '--cutoff-mode']);
+const RSYNC_VALUE_OPTS = new Set(['-e', '--rsh', '--exclude', '--include', '--filter', '-f', '--exclude-from', '--include-from', '--files-from', '--log-file', '--log-file-format', '--password-file',
+  '--chmod', '--chown', '--timeout', '--contimeout', '--bwlimit', '--max-size', '--min-size', '--max-delete', '--max-alloc', '--backup-dir', '--suffix', '--temp-dir', '-T', '--partial-dir', '--link-dest',
+  '--compare-dest', '--copy-dest', '--rsync-path', '--port', '--address', '--sockopts', '--out-format', '--block-size', '-B', '--modify-window', '--iconv', '--checksum-choice', '--cc', '--compress-choice',
+  '--zc', '--compress-level', '--zl', '--skip-compress', '--info', '--debug', '--usermap', '--groupmap', '--protocol', '--remote-option', '-M', '--read-batch', '--write-batch', '--only-write-batch',
+  '--outbuf', '--stop-after', '--stop-at', '--mkpath']);
+const SCP_VALUE_OPTS = new Set(['-P', '-i', '-o', '-c', '-F', '-S', '-l', '-J', '-D', '-X']);
+const AZ_VALUE_OPTS = new Set(['-s', '--source', '-d', '--destination', '--destination-path', '-c', '--container-name', '--account-name', '--account-key', '--connection-string', '--sas-token',
+  '--auth-mode', '--pattern', '--exclude-pattern', '--include-pattern', '--exclude-path', '--include-path', '--type', '--tier', '--content-type', '--content-encoding', '--content-cache',
+  '--content-disposition', '--content-language', '--content-md5', '--metadata', '--max-connections', '--lease-id', '--if-match', '--if-none-match', '--if-modified-since', '--if-unmodified-since',
+  '--subscription', '--output', '-o', '--query', '--blob-endpoint', '--socket-timeout', '--timeout', '--tags', '--validate-content', '--delete-destination']);
+
+const isRcloneRemote = (a) => /^:?[A-Za-z0-9_][\w.-]*:/.test(a) && !/^[A-Za-z]:[\\/]/.test(a);
+const isRsyncRemote = (a) => /^rsync:\/\//.test(a) || (/^[^/]+:/.test(a) && !/^[A-Za-z]:[\\/]/.test(a));
+const isScpRemote = (a) => /^scp:\/\//.test(a) || isRsyncRemote(a);
+
+function uploadRecord(manager, source, cwd, { recursive = true } = {}) {
+  if (/[$`]/.test(source)) return { manager, upload: true, error: `\`${manager}\` uploads a directory shipsafe cannot resolve from this command ("${source}" uses shell expansion). Run \`shipsafe check-dir <dir>\` on it first, then upload exactly that directory.` };
+  const dir = expandPath(source.replace(/\/+$/, '') || source, cwd);
+  if (existsSync(dir) && statSync(dir).isFile()) return null;
+  if (!recursive && !(existsSync(dir) && statSync(dir).isDirectory())) return null;
+  return { manager, upload: true, dirs: [dir] };
+}
+
+function findBucketUpload(prog, args, cwd) {
+  const has = (...flags) => args.some((a) => flags.includes(a) || flags.some((f) => a.startsWith(`${f}=`)));
+  if (prog === 'aws') {
+    const pos = deployPositionals(args, AWS_VALUE_OPTS);
+    if (pos[0] !== 's3' || !['sync', 'cp'].includes(pos[1]) || !pos[3]) return null;
+    const [src, dst] = [pos[2], pos[3]];
+    if (!/^s3:\/\//i.test(dst) || /^s3:\/\//i.test(src)) return null;
+    return uploadRecord(`aws s3 ${pos[1]}`, src, cwd, { recursive: pos[1] === 'sync' || has('--recursive') });
+  }
+  if (prog === 'gsutil') {
+    const pos = deployPositionals(args, GSUTIL_VALUE_OPTS);
+    if (!['rsync', 'cp', 'mv'].includes(pos[0]) || pos.length < 3) return null;
+    const [src, dst] = [pos[pos.length - 2], pos[pos.length - 1]];
+    if (!/^gs:\/\//i.test(dst) || /^gs:\/\//i.test(src)) return null;
+    return uploadRecord(`gsutil ${pos[0]}`, src, cwd, { recursive: pos[0] === 'rsync' || has('-r', '-R', '--recursive') });
+  }
+  if (prog === 'gcloud') {
+    const pos = deployPositionals(args, GCLOUD_VALUE_OPTS);
+    if (pos[0] !== 'storage' || !['rsync', 'cp', 'mv'].includes(pos[1]) || pos.length < 4) return null;
+    const [src, dst] = [pos[pos.length - 2], pos[pos.length - 1]];
+    if (!/^gs:\/\//i.test(dst) || /^gs:\/\//i.test(src)) return null;
+    return uploadRecord(`gcloud storage ${pos[1]}`, src, cwd, { recursive: pos[1] === 'rsync' || has('-r', '-R', '--recursive') });
+  }
+  if (prog === 'az') {
+    const pos = deployPositionals(args, AZ_VALUE_OPTS);
+    if (pos[0] !== 'storage' || pos[1] !== 'blob' || !['upload-batch', 'sync'].includes(pos[2])) return null;
+    const src = optionValue(args, '--source') ?? optionValue(args, '-s');
+    const manager = `az storage blob ${pos[2]}`;
+    return src ? uploadRecord(manager, src, cwd) : { manager, upload: true, error: `\`${manager}\` names no source directory shipsafe can check; pass \`--source <dir>\` after \`shipsafe check-dir <dir>\`.` };
+  }
+  if (prog === 'azcopy') {
+    const pos = deployPositionals(args, AZCOPY_VALUE_OPTS);
+    if (!['copy', 'cp', 'sync'].includes(pos[0]) || !pos[2]) return null;
+    const [src, dst] = [pos[1], pos[2]];
+    if (!/^https?:\/\//i.test(dst) || /^https?:\/\//i.test(src)) return null;
+    return uploadRecord(`azcopy ${pos[0]}`, src, cwd, { recursive: pos[0] === 'sync' || has('--recursive') });
+  }
+  if (prog === 'rclone') {
+    const pos = deployPositionals(args, RCLONE_VALUE_OPTS);
+    if (!['sync', 'copy', 'move', 'copyto', 'moveto'].includes(pos[0]) || !pos[2]) return null;
+    const [src, dst] = [pos[1], pos[2]];
+    if (!isRcloneRemote(dst) || isRcloneRemote(src)) return null;
+    return uploadRecord(`rclone ${pos[0]}`, src, cwd);
+  }
+  if (prog === 'rsync' || prog === 'scp') {
+    const opts = new Set(prog === 'rsync' ? RSYNC_VALUE_OPTS : SCP_VALUE_OPTS);
+    for (const a of args) if (prog === 'rsync' ? /^-[a-zA-Z]+[eBTMf]$/.test(a) : /^-[a-zA-Z]+[PiocFSlJD]$/.test(a)) opts.add(a);
+    const pos = deployPositionals(args, opts);
+    if (pos.length < 2) return null;
+    const dst = pos[pos.length - 1];
+    const remote = prog === 'rsync' ? isRsyncRemote : isScpRemote;
+    if (!remote(dst)) return null;
+    const sources = pos.slice(0, -1).filter((a) => !remote(a));
+    if (!sources.length) return null;
+    const recursive = prog === 'rsync' ? true : args.some((a) => /^-[a-zA-Z]*r/.test(a));
+    const found = [];
+    for (const src of sources) {
+      const r = uploadRecord(prog === 'rsync' ? 'rsync' : 'scp -r', src, cwd, { recursive });
+      if (r?.error) return r;
+      if (r) found.push(...r.dirs);
+    }
+    return found.length ? { manager: prog === 'rsync' ? 'rsync' : 'scp -r', upload: true, dirs: found } : null;
+  }
+  return null;
+}
+
+// --- JSR: the published set is TypeScript source by design, so only the leak rules apply to the directory.
+function gitignoreMatcher(lines) {
+  const rules = [];
+  for (let raw of lines) {
+    raw = raw.replace(/\r$/, '').replace(/(?<!\\)\s+$/, '');
+    if (!raw || raw.startsWith('#') || raw.startsWith('!')) continue;
+    const dirOnly = raw.endsWith('/');
+    const body = raw.replace(/\/+$/, '');
+    const anchored = body.includes('/');
+    const re = globToRegex(body.replace(/^\/+/, '').replace(/^\*\*\/?/, ''));
+    rules.push({ re, dirOnly, anchored, leadingStar: body.startsWith('**') });
+  }
+  return (rel, isDir) => {
+    const segs = rel.split('/');
+    for (const r of rules) {
+      for (let k = 1; k <= segs.length; k++) {
+        const last = k === segs.length;
+        if (r.dirOnly && last && !isDir) continue;
+        const candidate = r.anchored && !r.leadingStar ? segs.slice(0, k).join('/') : segs[k - 1];
+        if (r.re.test(candidate)) return true;
+      }
+    }
+    return false;
+  };
+}
+
+function jsrExclude(dir) {
+  const ignore = existsSync(join(dir, '.gitignore')) ? readFileSync(join(dir, '.gitignore'), 'utf8').split('\n') : [];
+  const config = ['jsr.json', 'jsr.jsonc', 'deno.json', 'deno.jsonc'].map((n) => join(dir, n)).find((p) => existsSync(p));
+  const publish = config ? readJsonFile(config)?.publish : null;
+  const exclude = gitignoreMatcher([...ignore, ...(Array.isArray(publish?.exclude) ? publish.exclude.filter((x) => typeof x === 'string') : [])]);
+  const include = Array.isArray(publish?.include) && publish.include.length ? gitignoreMatcher(publish.include.filter((x) => typeof x === 'string')) : null;
+  return (rel, isDir) => {
+    const top = rel.split('/')[0];
+    if (top === '.git' || top === 'node_modules') return true;
+    if (exclude(rel, isDir)) return true;
+    return include ? !isDir && !include(rel, isDir) : false;
+  };
+}
+
+function findJsrPublish(prog, args, cwd) {
+  const pos = deployPositionals(args, new Set(['--token', '--config', '-c', '--set-version']));
+  if (pos[0] !== 'publish' || args.includes('--dry-run')) return null;
+  const dir = pos[1] && !/[$`]/.test(pos[1]) ? expandPath(pos[1], cwd) : cwd;
+  const manager = `${prog} publish`;
+  return { manager, deploy: true, dirs: [dir], exclude: jsrExclude(dir), note: `\`${manager}\` uploads this directory as it is (minus gitignored and excluded paths); TypeScript source is expected on JSR, so only the leak rules apply.` };
+}
+
+// --- Extension marketplaces and remote builders.
+const VSCE_VALUE_OPTS = new Set(['-p', '--pat', '-t', '--target', '--baseContentUrl', '--baseImagesUrl', '--githubBranch', '--gitlabBranch', '-m', '--message', '--readme-path', '--changelog-path',
+  '-o', '--out', '-r', '--registryUrl', '--namespace', '--azure-credential', '--dependencies', '--yarn', '--no-yarn']);
+
+function findExtensionPublish(prog, args, cwd) {
+  const pos = deployPositionals(args, VSCE_VALUE_OPTS);
+  if (pos[0] !== 'publish') return null;
+  const manager = `${prog} publish`;
+  const files = pos.slice(1).filter((a) => /\.vsix$/i.test(a));
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--packagePath' || args[i] === '-i') { for (i++; i < args.length && !args[i].startsWith('-'); i++) files.push(args[i]); i--; } else if (args[i].startsWith('--packagePath=')) files.push(args[i].slice(14));
+  }
+  if (files.length) return { manager, release: true, ...expandAssets(files, cwd) };
+  return { manager, release: true, error: `\`${manager}\` packages the extension during the upload, so shipsafe never sees what ships. Run \`${prog} package\`, then \`shipsafe check <name>-<version>.vsix\`, then \`${manager} --packagePath <name>-<version>.vsix\`.` };
+}
+
+const BUILD_DIRS = ['.vercel/output/static', 'dist', 'build', 'out', '.output/public'];
+const REMOTE_BUILDERS = new Set(['fly', 'flyctl', 'railway', 'sam', 'cdk', 'serverless', 'sls', 'goreleaser', 'gradle', 'gradlew']);
+const SAFE_FLAGS = new Set(['--help', '-h', '--version', '--dry-run']);
+
+function remoteBuild(manager, cwd, how = 'builds remotely from source') {
+  const local = BUILD_DIRS.map((d) => join(cwd, d)).find((d) => existsSync(d) && statSync(d).isDirectory());
+  const hint = local ? ` A local build output exists at ${local}: \`shipsafe check-dir ${local}\` shows what a build like it ships.` : '';
+  return { manager, deploy: true, error: `\`${manager}\` ${how}; shipsafe cannot see the artifact.${hint}` };
+}
+
+function findRemoteBuild(prog, args, cwd) {
+  if (args.some((a) => SAFE_FLAGS.has(a))) return null;
+  const pos = deployPositionals(args, GCLOUD_VALUE_OPTS);
+  if (prog === 'fly' || prog === 'flyctl') {
+    if (pos[0] === 'deploy') return remoteBuild('fly deploy', cwd);
+    if (pos[0] === 'launch' && !args.includes('--no-deploy')) return remoteBuild('fly launch', cwd);
+    return null;
+  }
+  if (prog === 'railway') return pos[0] === 'up' ? remoteBuild('railway up', cwd) : null;
+  if (prog === 'gcloud') {
+    if (pos[0] === 'run' && pos[1] === 'deploy' && args.some((a) => a === '--source' || a.startsWith('--source='))) return remoteBuild('gcloud run deploy --source', cwd);
+    if (pos[0] === 'app' && pos[1] === 'deploy') return remoteBuild('gcloud app deploy', cwd);
+    if (pos[0] === 'functions' && pos[1] === 'deploy') return remoteBuild('gcloud functions deploy', cwd, 'uploads and builds the source directory');
+    return null;
+  }
+  if (prog === 'sam') return pos[0] === 'deploy' ? remoteBuild('sam deploy', cwd, 'packages and uploads in one step') : null;
+  if (prog === 'cdk') return pos[0] === 'deploy' ? remoteBuild('cdk deploy', cwd, 'bundles and uploads in one step') : null;
+  if (prog === 'serverless' || prog === 'sls') return pos[0] === 'deploy' ? remoteBuild(`${prog} deploy`, cwd, 'packages and uploads in one step') : null;
+  if (prog === 'goreleaser') {
+    if (pos.length && pos[0] !== 'release') return null;
+    if (args.some((a) => a === '--snapshot' || a === '--skip-publish' || /^--skip(=|$)/.test(a) && (a.split('=')[1] ?? args[args.indexOf(a) + 1] ?? '').split(',').includes('publish'))) return null;
+    return { manager: 'goreleaser release', deploy: true, error: '`goreleaser release` builds, archives and uploads in one run and names no artifact shipsafe can check. Run `goreleaser release --snapshot --clean` first, gate the archives under dist/ (`shipsafe check dist/*.tar.gz`), then release from the same tree.' };
+  }
+  if (prog === 'gradle' || prog === 'gradlew') {
+    if (args.some((a) => a === '-m' || a === '--dry-run')) return null;
+    const tasks = deployPositionals(args, new Set(['-p', '--project-dir', '-b', '--build-file', '-c', '--settings-file', '-I', '--init-script', '--console', '--max-workers', '-x', '--exclude-task', '-g', '--gradle-user-home', '--project-cache-dir', '-D', '-P', '--priority', '--warning-mode'])).filter((t) => /(^|:)publish[A-Za-z]*$/.test(t) && !/ToMavenLocal$/.test(t));
+    return tasks.length ? { manager: `${prog === 'gradlew' ? './gradlew' : 'gradle'} ${tasks[0]}`, deploy: true, error: `\`${prog === 'gradlew' ? './gradlew' : 'gradle'} ${tasks.join(' ')}\` names no artifact shipsafe can check. Build first, run \`shipsafe check build/libs/<name>-<version>.jar\`, then publish from the same tree.` } : null;
+  }
+  return null;
+}
+
+function findMavenDeploy(prog, args) {
+  const goals = deployPositionals(args, new Set(['-f', '--file', '-s', '--settings', '-gs', '--global-settings', '-pl', '--projects', '-P', '--activate-profiles', '-T', '--threads', '-rf', '--resume-from', '-t', '--toolchains', '-l', '--log-file', '-b', '--builder', '-D', '-am', '-amd']));
+  if (!goals.some((g) => g === 'deploy' || g === 'deploy:deploy')) return null;
+  return { manager: `${prog} deploy`, deploy: true, error: `\`${prog} deploy\` uploads whatever the build produces and names no artifact shipsafe can check. Run \`${prog} package\`, \`shipsafe check target/<name>-<version>.jar\`, then deploy from the same tree.` };
+}
+
+// --- Release-tag pushes (opt-in: askOnTagPush in .claude/shipsafe.json).
+const GIT_GLOBAL_VALUE_OPTS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--config-env', '--super-prefix', '--list-cmds', '--attr-source']);
+const GIT_PUSH_VALUE_OPTS = new Set(['-o', '--push-option', '--receive-pack', '--exec', '--repo']);
+
+function findGitPush(args, cwd) {
+  let i = 0;
+  let dir = cwd;
+  while (i < args.length && args[i].startsWith('-')) {
+    const a = args[i];
+    if (a === '-C' && args[i + 1] !== undefined) { if (!/[$`]/.test(args[i + 1])) dir = expandPath(args[i + 1], dir); i += 2; continue; }
+    i += !a.includes('=') && GIT_GLOBAL_VALUE_OPTS.has(a) ? 2 : 1;
+  }
+  if (args[i] !== 'push') return null;
+  const rest = args.slice(i + 1);
+  if (rest.some((a) => a === '-n' || a === '--dry-run' || a === '-d' || a === '--delete' || a === '--mirror')) return null;
+  const pos = deployPositionals(rest, GIT_PUSH_VALUE_OPTS);
+  const allTags = rest.includes('--tags') || rest.includes('--follow-tags');
+  const refs = [];
+  for (let k = 1; k < pos.length; k++) {
+    if (pos[k] === 'tag' && pos[k + 1]) { refs.push(`refs/tags/${pos[++k]}`); continue; }
+    const src = pos[k].replace(/^\+/, '').split(':')[0];
+    if (src) refs.push(src);
+  }
+  if (!allTags && !refs.length) return null;
+  return { manager: 'git push', tagPush: true, cwd: dir, allTags, refs, command: `git push ${rest.join(' ')}`.trim() };
+}
+
+function gitCommonDir(start) {
+  for (let d = resolve(start); ; d = dirname(d)) {
+    const dot = join(d, '.git');
+    if (existsSync(dot)) {
+      if (statSync(dot).isDirectory()) return { root: d, common: dot };
+      const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dot, 'utf8'));
+      const gitDir = m ? resolve(d, m[1].trim()) : null;
+      const common = gitDir && existsSync(join(gitDir, 'commondir')) ? resolve(gitDir, readFileSync(join(gitDir, 'commondir'), 'utf8').trim()) : gitDir;
+      return { root: d, common };
+    }
+    if (dirname(d) === d) return null;
+  }
+}
+
+function localTagExists(common, name) {
+  if (!common || !/^[\w.\/-]+$/.test(name)) return false;
+  if (existsSync(join(common, 'refs', 'tags', name))) return true;
+  const packed = join(common, 'packed-refs');
+  return existsSync(packed) && readFileSync(packed, 'utf8').includes(` refs/tags/${name}\n`);
+}
+
+// Workflows whose `on.push.tags` filter fires on a tag push: [{ file, globs }].
+function tagWorkflows(root) {
+  const dir = join(root, '.github', 'workflows');
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
+  const out = [];
+  for (const name of readdirSync(dir).sort()) {
+    if (!/\.ya?ml$/i.test(name)) continue;
+    const lines = readFileSync(join(dir, name), 'utf8').split(/\r?\n/);
+    const indentOf = (l) => l.length - l.trimStart().length;
+    const block = (from, indent) => { const end = lines.findIndex((l, j) => j > from && l.trim() && !l.trimStart().startsWith('#') && indentOf(l) <= indent); return lines.slice(from + 1, end === -1 ? lines.length : end); };
+    const onAt = lines.findIndex((l) => /^(["']?on["']?|true):\s*(#.*)?$/.test(l));
+    if (onAt === -1) continue;
+    const onBlock = block(onAt, indentOf(lines[onAt]));
+    const pushAt = onBlock.findIndex((l) => /^\s*push:\s*(#.*)?$/.test(l));
+    if (pushAt === -1) continue;
+    const pushBlock = (() => { const indent = indentOf(onBlock[pushAt]); const end = onBlock.findIndex((l, j) => j > pushAt && l.trim() && indentOf(l) <= indent); return onBlock.slice(pushAt + 1, end === -1 ? onBlock.length : end); })();
+    const tagsAt = pushBlock.findIndex((l) => /^\s*tags:/.test(l));
+    if (tagsAt === -1) continue;
+    const inline = /^\s*tags:\s*\[(.*)\]/.exec(pushBlock[tagsAt]);
+    const items = inline ? inline[1].split(',') : [];
+    if (!inline) for (let j = tagsAt + 1; j < pushBlock.length && /^\s*-\s/.test(pushBlock[j]); j++) items.push(pushBlock[j].replace(/^\s*-\s*/, ''));
+    const globs = items.map((x) => x.trim().replace(/^(["'])(.*)\1$/, '$2').replace(/\s+#.*$/, '')).filter(Boolean);
+    out.push({ file: `.github/workflows/${name}`, globs });
+  }
+  return out;
+}
+
+function tagGlobMatches(glob, tag) {
+  if (glob.startsWith('!')) return false;
+  const re = new RegExp(`^${glob.split('**').map((part) => part.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\\\?/g, '[^/]')).join('[^/]*')).join('.*')}$`);
+  return re.test(tag) || re.test(`refs/tags/${tag}`);
+}
+
+function evaluateTagPush(p) {
+  const opt = localOptIn(p.cwd, 'askOnTagPush');
+  if (opt.error) return opt.error;
+  if (!opt.on) return null;
+  const git = gitCommonDir(p.cwd);
+  const workflows = git ? tagWorkflows(git.root) : [];
+  const triggered = workflows.map((w) => w.file).join(', ');
+  if (p.allTags) {
+    return `\`${p.command}\` pushes tags, and a tag push is a release when a workflow listens for it${triggered ? ` (${triggered} runs on tag pushes)` : ' (no workflow in .github/workflows was found to run on tag pushes)'}. Gate the artifact that workflow publishes before the tag goes out, then push the tag by name. (askOnTagPush is on in ${opt.source})`;
+  }
+  if (!workflows.length) return null;
+  const tags = p.refs.map((ref) => ref.replace(/^refs\/tags\//, '')).filter((tag, k) => p.refs[k].startsWith('refs/tags/') || localTagExists(git?.common, tag) || workflows.some((w) => !w.globs.length || w.globs.some((g) => tagGlobMatches(g, tag))));
+  if (!tags.length) return null;
+  const hits = workflows.filter((w) => !w.globs.length || tags.some((t) => w.globs.some((g) => tagGlobMatches(g, t)))).map((w) => w.file);
+  if (!hits.length) return null;
+  return `\`${p.command}\` pushes tag ${tags.join(', ')}; ${hits.join(', ')} runs on tag pushes and would release from that commit. Gate the artifact it publishes first, then push the tag. (askOnTagPush is on in ${opt.source})`;
+}
+
 function scanSegment(seg, cwd, ctx) {
   if (ctx.depth > MAX_NESTING) throw new GuardError('the command nests shells or runners too deeply');
   const t = unwrap(seg);
@@ -1836,6 +2281,35 @@ function scanSegment(seg, cwd, ctx) {
     nested(stripRunnerOpts(t.slice(1), { ...ctx, cwd, depth: ctx.depth + 1 }));
     return cwd;
   }
+  if (prog === 'make' || prog === 'gmake') {
+    runMake(t.slice(1), cwd, ctx);
+    return cwd;
+  }
+  if (prog === 'git') {
+    const r = findGitPush(t.slice(1), cwd);
+    if (r) ctx.out.push({ ...r, dryRun: false, computed: ctx.computed });
+    return cwd;
+  }
+  if (['aws', 'gsutil', 'az', 'azcopy', 'rclone', 'rsync', 'scp'].includes(prog) || (prog === 'gcloud' && t[1] === 'storage')) {
+    const r = findBucketUpload(prog, t.slice(1), cwd);
+    if (r) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed, deploy: true });
+    return cwd;
+  }
+  if (prog === 'jsr' || prog === 'deno') {
+    const r = findJsrPublish(prog, t.slice(1), cwd);
+    if (r) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed });
+    return cwd;
+  }
+  if (prog === 'vsce' || prog === 'ovsx') {
+    const r = findExtensionPublish(prog, t.slice(1), cwd);
+    if (r) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed });
+    return cwd;
+  }
+  if (REMOTE_BUILDERS.has(prog) || prog === 'gcloud') {
+    const r = findRemoteBuild(prog, t.slice(1), cwd);
+    if (r) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed });
+    return cwd;
+  }
   if (/^python(\d(\.\d+)?)?$/.test(prog) && t[1] === '-m' && t[2]) return nested(t.slice(2));
   if (prog === 'pipx' && t[1] === 'run') { nested(stripRunnerOpts(t.slice(2), { ...ctx, cwd, depth: ctx.depth + 1 })); return cwd; }
   if (prog === 'uv' && (t[1] === 'run' || (t[1] === 'tool' && t[2] === 'run'))) { nested(stripRunnerOpts(t.slice(t[1] === 'run' ? 2 : 3), { ...ctx, cwd, depth: ctx.depth + 1 })); return cwd; }
@@ -1847,6 +2321,7 @@ function scanSegment(seg, cwd, ctx) {
   if (['dotnet', 'nuget', 'gem', 'mvn', 'mvnw', 'helm'].includes(prog)) {
     const r = findPackageUpload(prog, t.slice(1), cwd);
     if (r && (r.assets || r.error)) ctx.out.push({ ...r, cwd, dryRun: false, computed: ctx.computed, release: true });
+    else if (prog === 'mvn' || prog === 'mvnw') { const m = findMavenDeploy(prog, t.slice(1)); if (m) ctx.out.push({ ...m, cwd, dryRun: false, computed: ctx.computed }); }
     return cwd;
   }
   if (['docker', 'podman', 'docker-compose', 'podman-compose'].includes(prog)) {
@@ -1872,6 +2347,10 @@ function scanSegment(seg, cwd, ctx) {
   const args = t.slice(1);
   const first = firstPositional(args);
   if (first !== -1 && ORCHESTRATORS.has(args[first])) return nested(args.slice(first));
+  if (first !== -1 && (args[first] === 'run' || args[first] === 'run-script')) {
+    runScript(prog, args.slice(first + 1), cwd, ctx);
+    return cwd;
+  }
   if (first !== -1 && RUNNER_SUBCOMMANDS.has(args[first]) && !(prog === 'yarn' && args[first] === 'x')) {
     nested(stripRunnerOpts(args.slice(first + 1), { ...ctx, cwd, depth: ctx.depth + 1 }));
     return cwd;
@@ -1891,6 +2370,7 @@ function scanSegment(seg, cwd, ctx) {
   }
   if (idx > 0 && NON_PUBLISH_COMMANDS.has(pos[0])) return cwd;
   ctx.out.push({ ...base, manager: prog, tarballArg: pos[idx + 1] ?? null, unsupported: false });
+  if (!dryRun && !/\.(tgz|tar\.gz)$/i.test(pos[idx + 1] ?? '')) publishLifecycle(prog, pos[idx + 1] && !/[$`]/.test(pos[idx + 1]) ? expandPath(pos[idx + 1], cwd) : cwd, ctx);
   return cwd;
 }
 
@@ -1907,14 +2387,14 @@ export function findPublishes(command, startCwd) {
 function evaluateDeploy(p) {
   if (p.error) return p.error;
   for (const dir of p.dirs) {
-    if (!existsSync(dir) || !statSync(dir).isDirectory()) return `\`${p.manager}\` output directory not found: ${dir}. Build first, then run \`shipsafe check-dir ${dir}\`.`;
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) return `\`${p.manager}\` ${p.upload ? 'source' : 'output'} directory not found: ${dir}. Build first, then run \`shipsafe check-dir ${dir}\`.`;
     let r;
     try {
-      r = checkDirectory(dir);
+      r = checkDirectory(dir, { exclude: p.exclude });
     } catch (e) {
       return `shipsafe could not check ${dir}: ${e.message}`;
     }
-    if (!r.pass) return `shipsafe check-dir failed for ${dir}:\n${formatReport(r)}`;
+    if (!r.pass) return `${p.note ? `${p.note}\n` : ''}shipsafe check-dir failed for ${dir}:\n${formatReport(r)}`;
   }
   return null;
 }
@@ -1926,7 +2406,7 @@ function evaluateRelease(p) {
       if (NESTED_ARCHIVE.test(file)) return `release asset ${file} is an archive shipsafe cannot scan yet. Check its contents yourself, or attach a .tgz that passes \`shipsafe check\`.`;
       continue;
     }
-    if (!existsSync(file) || !statSync(file).isFile()) return `release asset not found: ${file}`;
+    if (!existsSync(file) || !statSync(file).isFile()) return `${p.manager === 'gh release' ? 'release asset' : `\`${p.manager}\` upload`} not found: ${file}`;
     let r;
     try {
       r = checkTarball(file, undefined, { asset: true });
@@ -1939,6 +2419,12 @@ function evaluateRelease(p) {
 }
 
 function evaluatePublish(p) {
+  const reason = evaluateOne(p);
+  return reason && p.via ? `via ${p.via}: ${reason}` : reason;
+}
+
+function evaluateOne(p) {
+  if (p.tagPush) return evaluateTagPush(p);
   if (p.image) return evaluateImagePush(p);
   if (p.cargo) return evaluateCargo(p);
   if (p.release) return evaluateRelease(p);

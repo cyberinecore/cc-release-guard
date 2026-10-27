@@ -586,7 +586,7 @@
           },
           {
             "type": "command",
-            "if": "Bash(*git*push*tags*)",
+            "if": "Bash(*git*push*)",
             "command": "node",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
@@ -596,7 +596,7 @@
           },
           {
             "type": "command",
-            "if": "Bash(*git*push* v*)",
+            "if": "Bash(*gh*pr*merge*)",
             "command": "node",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
@@ -606,7 +606,67 @@
           },
           {
             "type": "command",
-            "if": "Bash(*git*push* tag *)",
+            "if": "Bash(*release*.sh*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*deploy*.sh*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*ship*.sh*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*.sh release*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*.sh deploy*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*.sh redeploy*)",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",
+              "hook"
+            ],
+            "timeout": 300
+          },
+          {
+            "type": "command",
+            "if": "Bash(*.sh ship*)",
             "command": "node",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs",

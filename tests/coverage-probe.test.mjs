@@ -105,6 +105,62 @@ const jsrClean = write(join(root, 'jsr-clean'), {
   'fixtures/app.js.map': '{}',
 });
 const empty = write(join(root, 'empty'), { 'README.md': 'nothing here\n' });
+// Shell scripts: two named for a deploy, one run with a deploy verb, two that must stay silent.
+write(proj, {
+  'scripts/deploy-frontend.sh': '#!/bin/sh\n# aws s3 sync is the deploy\nset -e\naws s3 sync dist s3://probe-bucket/site\n',
+  'scripts/cf.sh': '#!/usr/bin/env bash\ncase "$1" in\n  deploy) npx wrangler pages deploy dist --project-name probe ;;\n  status) echo ok ;;\nesac\n',
+  'scripts/build.sh': '#!/bin/sh\nnpm publish\n',
+  'scripts/release-mac.sh': '#!/bin/sh\nxcrun notarytool submit app.zip --wait\n',
+});
+
+// Real git repositories with a bare remote, for the askOnBranchPush opt-in.
+const git = (cwd, ...args) => {
+  const r = spawnSync('git', ['-c', 'user.name=probe', '-c', 'user.email=probe@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+};
+const fakeToken = 'gh' + 'p_' + 'A'.repeat(36);
+function gitRepo(name, files) {
+  const dir = write(join(root, name), files);
+  mkdirSync(join(root, `${name}.git`));
+  git(join(root, `${name}.git`), 'init', '--bare', '-q');
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'init');
+  git(dir, 'remote', 'add', 'origin', join(root, `${name}.git`));
+  git(dir, 'push', '-q', 'origin', 'main');
+  return dir;
+}
+const branchy = gitRepo('branchy', {
+  'README.md': 'hi\n',
+  '.claude/shipsafe.json': JSON.stringify({ askOnBranchPush: ['main'] }),
+  '.github/workflows/deploy.yml': "name: deploy\non:\n  push:\n    branches: [production]\njobs:\n  d:\n    runs-on: ubuntu-latest\n    steps:\n      - run: aws s3 sync dist s3://b\n",
+});
+write(branchy, { '.env': 'TOKEN=1\n', 'config.js': `export const t = '${fakeToken}';\n` });
+git(branchy, 'add', '-A');
+git(branchy, 'commit', '-q', '-m', 'leak');
+write(branchy, { 'config.js': 'export const t = process.env.T;\n' });
+git(branchy, 'add', '-A');
+git(branchy, 'commit', '-q', '-m', 'remove the token, which history still holds');
+git(branchy, 'branch', 'feature');
+const clean = gitRepo('clean-push', {
+  'README.md': 'hi\n',
+  '.claude/shipsafe.json': JSON.stringify({ askOnBranchPush: ['main'] }),
+});
+write(clean, { 'docs.md': 'more\n' });
+git(clean, 'add', '-A');
+git(clean, 'commit', '-q', '-m', 'docs');
+const bitbucket = gitRepo('bitbucket', {
+  'README.md': 'hi\n',
+  '.claude/shipsafe.json': JSON.stringify({ askOnBranchPush: true }),
+  'bitbucket-pipelines.yml': "pipelines:\n  branches:\n    development:\n      - step:\n          script:\n            - aws s3 sync dist s3://b\n    '{uat-sat,production-sat}':\n      - step:\n          script:\n            - aws s3 sync dist s3://c\n",
+});
+write(bitbucket, { 'id_rsa': 'not really a key\n' });
+git(bitbucket, 'add', '-A');
+git(bitbucket, 'commit', '-q', '-m', 'oops');
+const noOptIn = gitRepo('no-opt-in', { 'README.md': 'hi\n' });
+write(noOptIn, { '.env': 'TOKEN=1\n' });
+git(noOptIn, 'add', '-A');
+git(noOptIn, 'commit', '-q', '-m', 'env');
 
 const SEEN = 'SEEN';
 const MISS = 'MISS';
@@ -266,6 +322,31 @@ const rows = [
   [MISS, 'git push --tags', plain],
   [MISS, 'git push origin v1.2.3', plain],
   [MISS, 'git tag v1.2.3', proj],
+  // 7. branch pushes and PR merges that deploy (opt-in askOnBranchPush)
+  [SEEN, 'git push origin main', branchy, /lands on main, which \.claude\/shipsafe\.json[\s\S]*sensitive-file\s+\.env[\s\S]*secret-token\s+config\.js/],
+  [SEEN, 'git push', branchy, /lands on main/],
+  [SEEN, 'git push -u origin HEAD', branchy, /lands on main/],
+  [SEEN, 'git push origin main:production', branchy, /lands on production, which \.github\/workflows\/deploy\.yml/],
+  [SEEN, 'git push --all origin', branchy, /lands on main/],
+  [SEEN, 'git push origin HEAD:uat-sat', bitbucket, /bitbucket-pipelines\.yml[\s\S]*sensitive-file\s+id_rsa/],
+  [SEEN, 'git push origin main:development', bitbucket, /lands on development/],
+  [SEEN, 'gh pr merge 12 --squash', branchy, /merges on the server.*main, production/],
+  [MISS, 'git push origin feature', branchy],
+  [MISS, 'git push origin main --dry-run', branchy],
+  [MISS, 'git push origin main', clean],
+  [MISS, 'git push origin main', bitbucket],
+  [MISS, 'git push origin main', noOptIn],
+  [MISS, 'gh pr merge 12', noOptIn],
+  [MISS, 'gh pr view 12', branchy],
+  // 8. shell scripts named for a release, or run with a release verb
+  [SEEN, 'bash scripts/deploy-frontend.sh', proj, /via scripts\/deploy-frontend\.sh: .*source-map/s],
+  [SEEN, './scripts/deploy-frontend.sh', proj, /source-map/],
+  [SEEN, 'scripts/cf.sh deploy', proj, /via scripts\/cf\.sh deploy/],
+  [SEEN, 'sh scripts/cf.sh deploy', proj, /source-map/],
+  [MISS, 'bash scripts/cf.sh status', proj],
+  [MISS, 'bash scripts/build.sh', proj],
+  [MISS, 'bash scripts/release-mac.sh', proj],
+  [MISS, 'bash scripts/deploy-frontend.sh', empty],
   // must stay silent
   [MISS, 'echo "npm publish"', proj],
   [MISS, 'grep publish README.md', proj],

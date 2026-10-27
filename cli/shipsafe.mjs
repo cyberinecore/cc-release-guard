@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -1765,7 +1766,7 @@ function localOptIn(cwd, key) {
       } catch (e) {
         return { error: `${p} is not valid JSON (${e.message}); fix it or remove ${key}.` };
       }
-      return { on: json?.[key] === true, source: p };
+      return { on: json?.[key] === true, value: json?.[key], source: p };
     }
     if (dirname(d) === d) return { on: false };
   }
@@ -1923,6 +1924,25 @@ function runMake(args, cwd, ctx) {
     if (!recipe) continue;
     for (const line of recipe.split('\n')) scanScript(line, dir, ctx, `make ${t}`);
   }
+}
+
+// --- Shell scripts named for a release, or run with a release verb: the body is scanned, one nested level.
+const SCRIPT_NAME = /(release|publish|deploy|ship)/i;
+const SCRIPT_VERBS = new Set(['release', 'publish', 'deploy', 'ship', 'redeploy']);
+const MAX_SCRIPT_BYTES = 256 * 1024;
+
+function runShellScript(path, args, cwd, ctx, viaShell = true) {
+  if (/[$`*?]/.test(path)) return false;
+  const name = basename(path);
+  if (!SCRIPT_NAME.test(name) && !SCRIPT_VERBS.has(args.find((a) => !a.startsWith('-')) ?? '')) return false;
+  const file = expandPath(path, cwd);
+  if (!existsSync(file) || !statSync(file).isFile() || statSync(file).size > MAX_SCRIPT_BYTES) return false;
+  const text = readFileSync(file, 'utf8');
+  if (text.includes('\0')) return false;
+  if (!viaShell && !/\.(sh|bash|zsh)$/.test(name) && !/^#!\s*\S*\/(env\s+)?(sh|bash|zsh|dash|ksh)\b/.test(text)) return false;
+  const body = text.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
+  scanScript(body, cwd, ctx, `${path}${args.length ? ` ${args.join(' ')}` : ''}`);
+  return true;
 }
 
 // --- Bucket and server uploads: the local source directory is gated like `check-dir`.
@@ -2166,8 +2186,8 @@ function findGitPush(args, cwd) {
     const src = pos[k].replace(/^\+/, '').split(':')[0];
     if (src) refs.push(src);
   }
-  if (!allTags && !refs.length) return null;
-  return { manager: 'git push', tagPush: true, cwd: dir, allTags, refs, command: `git push ${rest.join(' ')}`.trim() };
+  const allBranches = rest.includes('--all') || rest.includes('--branches');
+  return { manager: 'git push', tagPush: true, cwd: dir, allTags, allBranches, refspecs: pos.slice(1), refs, command: `git push ${rest.join(' ')}`.trim() };
 }
 
 function gitCommonDir(start) {
@@ -2191,8 +2211,10 @@ function localTagExists(common, name) {
   return existsSync(packed) && readFileSync(packed, 'utf8').includes(` refs/tags/${name}\n`);
 }
 
-// Workflows whose `on.push.tags` filter fires on a tag push: [{ file, globs }].
-function tagWorkflows(root) {
+const tagWorkflows = (root) => workflowPushFilters(root, 'tags');
+
+// Workflows whose `on.push.<key>` filter (`tags` or `branches`) is set: [{ file, globs }].
+function workflowPushFilters(root, key) {
   const dir = join(root, '.github', 'workflows');
   if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
   const out = [];
@@ -2207,9 +2229,9 @@ function tagWorkflows(root) {
     const pushAt = onBlock.findIndex((l) => /^\s*push:\s*(#.*)?$/.test(l));
     if (pushAt === -1) continue;
     const pushBlock = (() => { const indent = indentOf(onBlock[pushAt]); const end = onBlock.findIndex((l, j) => j > pushAt && l.trim() && indentOf(l) <= indent); return onBlock.slice(pushAt + 1, end === -1 ? onBlock.length : end); })();
-    const tagsAt = pushBlock.findIndex((l) => /^\s*tags:/.test(l));
+    const tagsAt = pushBlock.findIndex((l) => new RegExp(`^\\s*${key}:`).test(l));
     if (tagsAt === -1) continue;
-    const inline = /^\s*tags:\s*\[(.*)\]/.exec(pushBlock[tagsAt]);
+    const inline = new RegExp(`^\\s*${key}:\\s*\\[(.*)\\]`).exec(pushBlock[tagsAt]);
     const items = inline ? inline[1].split(',') : [];
     if (!inline) for (let j = tagsAt + 1; j < pushBlock.length && /^\s*-\s/.test(pushBlock[j]); j++) items.push(pushBlock[j].replace(/^\s*-\s*/, ''));
     const globs = items.map((x) => x.trim().replace(/^(["'])(.*)\1$/, '$2').replace(/\s+#.*$/, '')).filter(Boolean);
@@ -2218,10 +2240,182 @@ function tagWorkflows(root) {
   return out;
 }
 
+const refGlob = (glob) => new RegExp(`^${glob.split('**').map((part) => part.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\\\?/g, '[^/]')).join('[^/]*')).join('.*')}$`);
+
 function tagGlobMatches(glob, tag) {
   if (glob.startsWith('!')) return false;
-  const re = new RegExp(`^${glob.split('**').map((part) => part.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\\\?/g, '[^/]')).join('[^/]*')).join('.*')}$`);
+  const re = refGlob(glob);
   return re.test(tag) || re.test(`refs/tags/${tag}`);
+}
+
+function branchGlobMatches(glob, branch) {
+  if (glob.startsWith('!')) return false;
+  const braces = /^(.*)\{([^{}]*)\}(.*)$/.exec(glob);
+  if (braces) return braces[2].split(',').some((alt) => branchGlobMatches(`${braces[1]}${alt}${braces[3]}`, branch));
+  return refGlob(glob).test(branch);
+}
+
+// Branch keys under `pipelines: branches:` in bitbucket-pipelines.yml: [{ file, globs }].
+function bitbucketBranchFilters(root) {
+  const file = join(root, 'bitbucket-pipelines.yml');
+  if (!existsSync(file)) return [];
+  const lines = readFileSync(file, 'utf8').split(/\r?\n/);
+  const indentOf = (l) => l.length - l.trimStart().length;
+  const pipelinesAt = lines.findIndex((l) => /^pipelines:\s*(#.*)?$/.test(l));
+  if (pipelinesAt === -1) return [];
+  const branchesAt = lines.findIndex((l, j) => j > pipelinesAt && /^\s+branches:\s*(#.*)?$/.test(l));
+  if (branchesAt === -1) return [];
+  const base = indentOf(lines[branchesAt]);
+  let keyIndent = -1;
+  const globs = [];
+  for (let j = branchesAt + 1; j < lines.length; j++) {
+    const l = lines[j];
+    if (!l.trim() || l.trimStart().startsWith('#')) continue;
+    const ind = indentOf(l);
+    if (ind <= base) break;
+    if (keyIndent === -1) keyIndent = ind;
+    if (ind !== keyIndent) continue;
+    const m = /^\s*(["']?)(.+?)\1:\s*(#.*)?$/.exec(l);
+    if (m) globs.push(m[2]);
+  }
+  return globs.length ? [{ file: 'bitbucket-pipelines.yml', globs }] : [];
+}
+
+const gitRun = (cwd, args, input) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd, input, ...(input === undefined && { encoding: 'utf8' }), maxBuffer: 256 * 1024 * 1024, stdio: ['pipe', 'pipe', 'ignore'] });
+const PUSH_RULES = new Set(['sensitive-file', 'secret-token']);
+const MAX_PUSH_BLOBS = 5000;
+
+// The refs a branch push sends: [{ src, branch }], resolved against the local repository.
+function pushedBranches(p, root) {
+  const local = (name) => { try { gitRun(root, ['show-ref', '--verify', '--quiet', `refs/heads/${name}`]); return true; } catch { return false; } };
+  const current = () => { try { return gitRun(root, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim(); } catch { return null; } };
+  if (p.allBranches) return gitRun(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']).split('\n').filter(Boolean).map((b) => ({ src: b, branch: b }));
+  const refs = p.refspecs;
+  if (!refs.length) { const b = current(); return b ? [{ src: b, branch: b }] : []; }
+  const out = [];
+  for (let k = 0; k < refs.length; k++) {
+    const raw = refs[k];
+    if (raw === 'tag') { k++; continue; }
+    if (/^refs\/tags\//.test(raw)) continue;
+    const [src, dst] = raw.replace(/^\+/, '').split(':');
+    if (!src || /[$`]/.test(raw)) continue;
+    const srcRef = src === 'HEAD' ? 'HEAD' : src.replace(/^refs\/heads\//, '');
+    if (srcRef !== 'HEAD' && !local(srcRef)) continue;
+    const branch = (dst ?? (srcRef === 'HEAD' ? current() : srcRef))?.replace(/^refs\/heads\//, '');
+    if (branch) out.push({ src: srcRef, branch });
+  }
+  return out;
+}
+
+// Files added or changed by every commit the push sends that no remote-tracking ref holds yet.
+function scanPushedCommits(root, src, config) {
+  const commits = gitRun(root, ['rev-list', src, '--not', '--remotes']).split('\n').filter(Boolean);
+  const blobs = new Map();
+  for (const c of commits) {
+    for (const line of gitRun(root, ['diff-tree', '-r', '--root', '--no-commit-id', '--diff-filter=AM', c]).split('\n')) {
+      const m = /^:\d+ (\d+) [0-9a-f]+ ([0-9a-f]+) [AM]\t(.+)$/.exec(line);
+      if (m && m[1] !== '160000' && !blobs.has(m[2])) blobs.set(m[2], m[3]);
+    }
+    if (blobs.size > MAX_PUSH_BLOBS) throw new GuardError(`the push sends more than ${MAX_PUSH_BLOBS} new files; check it with a secret scanner before pushing`);
+  }
+  const findings = [];
+  const record = (path, hits) => {
+    for (const [rule, detail] of hits) {
+      if (!PUSH_RULES.has(rule) || findings.some((f) => f.rule === rule && f.path === path)) continue;
+      const allow = config.allow.find((a) => a.rule === rule && a.re.test(path));
+      if (allow) allow.used = true;
+      findings.push({ rule, path, detail, allowed: !!allow, reason: allow?.reason });
+    }
+  };
+  if (blobs.size) {
+    const shas = [...blobs.keys()];
+    const out = gitRun(root, ['cat-file', '--batch'], `${shas.join('\n')}\n`);
+    let at = 0;
+    for (const sha of shas) {
+      const nl = out.indexOf(10, at);
+      const header = out.toString('utf8', at, nl).split(' ');
+      const size = Number(header[2]);
+      const data = out.subarray(nl + 1, nl + 1 + size);
+      at = nl + 1 + size + 1;
+      record(blobs.get(sha), [...scanPath(blobs.get(sha)), ...scanContent(data)]);
+    }
+  }
+  return { commits: commits.length, files: blobs.size, findings };
+}
+
+function branchPushConfig(root) {
+  const pkg = join(root, 'package.json');
+  if (!existsSync(pkg)) return parseConfig({});
+  try {
+    return parseConfig(JSON.parse(readFileSync(pkg, 'utf8')));
+  } catch (e) {
+    throw new GuardError(`${pkg} is not valid JSON: ${e.message}`);
+  }
+}
+
+// Deploy branches: the opt-in's own list plus branches a CI file runs on push for: [{ glob, source }].
+function deployBranches(opt, root) {
+  const listed = Array.isArray(opt.value) ? opt.value.filter((b) => typeof b === 'string' && b) : [];
+  const out = listed.map((glob) => ({ glob, source: relative(root, opt.source).split('\\').join('/') }));
+  for (const w of [...workflowPushFilters(root, 'branches'), ...bitbucketBranchFilters(root)]) for (const glob of w.globs) out.push({ glob, source: w.file });
+  return out;
+}
+
+function branchPushOptIn(cwd) {
+  const opt = localOptIn(cwd, 'askOnBranchPush');
+  if (opt.error) return opt;
+  if (opt.value === undefined || opt.value === false) return { on: false };
+  if (opt.value !== true && !(Array.isArray(opt.value) && opt.value.every((b) => typeof b === 'string'))) return { error: `askOnBranchPush in ${opt.source} must be true or a list of branch names.` };
+  return { ...opt, on: true };
+}
+
+function evaluateBranchPush(p) {
+  const opt = branchPushOptIn(p.cwd);
+  if (opt.error) return opt.error;
+  if (!opt.on) return null;
+  const git = gitCommonDir(p.cwd);
+  if (!git) return null;
+  const targets = deployBranches(opt, git.root);
+  if (!targets.length) return null;
+  let pushed;
+  try {
+    pushed = pushedBranches(p, git.root);
+  } catch {
+    return null;
+  }
+  const hits = pushed.map((b) => ({ ...b, why: targets.filter((t) => branchGlobMatches(t.glob, b.branch)).map((t) => t.source) })).filter((b) => b.why.length);
+  if (!hits.length) return null;
+  const reasons = [];
+  for (const b of hits) {
+    const where = `\`${p.command}\` lands on ${b.branch}, which ${[...new Set(b.why)].join(' and ')} treats as a deploy branch`;
+    let r;
+    try {
+      const config = branchPushConfig(git.root);
+      r = scanPushedCommits(git.root, b.src, config);
+    } catch (e) {
+      reasons.push(`${where}, and shipsafe could not read the commits it sends (${e.message}). Check them with a secret scanner before pushing.`);
+      continue;
+    }
+    const blocking = r.findings.filter((f) => !f.allowed);
+    if (!blocking.length) continue;
+    const lines = blocking.map((f) => `FAIL  ${f.rule.padEnd(18)} ${f.path}${f.detail ? `: ${f.detail}` : ''}`);
+    const rules = [...new Set(blocking.map((f) => f.rule))].map((k) => `${k} = ${RULES[k]}`);
+    reasons.push(`${where}. The ${r.commits} commit(s) it sends add:\n${lines.join('\n')}\nFAIL  ${blocking.length} finding(s). ${rules.join('; ')}\nA later commit that deletes a file still ships it in history: rewrite the commits before pushing, and rotate any real secret. A false positive takes an allow entry with a reason under "shipsafe" in ${join(git.root, 'package.json')}.`);
+  }
+  return reasons.length ? `${reasons.join('\n')}\n(askOnBranchPush is on in ${opt.source})` : null;
+}
+
+function evaluatePrMerge(p) {
+  const opt = branchPushOptIn(p.cwd);
+  if (opt.error) return opt.error;
+  if (!opt.on) return null;
+  const git = gitCommonDir(p.cwd);
+  if (!git) return null;
+  const targets = deployBranches(opt, git.root);
+  if (!targets.length) return null;
+  const list = [...new Set(targets.map((t) => t.glob))].join(', ');
+  const sources = [...new Set(targets.map((t) => t.source))].join(' and ');
+  return `\`${p.command}\` merges on the server, so shipsafe cannot see the base branch or scan the commits from here. If the base is ${list} (${sources}), this merge deploys. Check the pull request's commits for credential files and secrets before merging. (askOnBranchPush is on in ${opt.source})`;
 }
 
 function evaluateTagPush(p) {
@@ -2256,7 +2450,15 @@ function scanSegment(seg, cwd, ctx) {
   if (SHELLS.has(prog)) {
     const i = t.findIndex((a, k) => k > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a));
     if (i !== -1 && t[i + 1] !== undefined) scanCommand(t[i + 1], cwd, { ...ctx, depth: ctx.depth + 1 });
+    else {
+      let k = 1;
+      while (k < t.length && t[k].startsWith('-')) k += t[k] === '-o' || t[k] === '+o' ? 2 : 1;
+      if (t[k] !== undefined) runShellScript(t[k], t.slice(k + 1), cwd, ctx);
+    }
     return cwd;
+  }
+  if (t[0].includes('/') || /\.(sh|bash|zsh)$/.test(t[0])) {
+    if (runShellScript(t[0], t.slice(1), cwd, ctx, false)) return cwd;
   }
   if (prog === 'eval') {
     scanCommand(t.slice(1).join(' '), cwd, { ...ctx, depth: ctx.depth + 1 });
@@ -2330,6 +2532,10 @@ function scanSegment(seg, cwd, ctx) {
     return cwd;
   }
   if (prog === 'gh') {
+    if (t[1] === 'pr' && t[2] === 'merge' && !t.includes('--help')) {
+      ctx.out.push({ manager: 'gh pr merge', prMerge: true, cwd, dryRun: false, computed: ctx.computed, command: t.join(' ') });
+      return cwd;
+    }
     const r = findReleaseAssets(t.slice(1), cwd);
     if (r) ctx.out.push({ ...r, manager: 'gh release', cwd, dryRun: false, computed: ctx.computed, release: true });
     return cwd;
@@ -2424,7 +2630,8 @@ function evaluatePublish(p) {
 }
 
 function evaluateOne(p) {
-  if (p.tagPush) return evaluateTagPush(p);
+  if (p.tagPush) return [evaluateTagPush(p), evaluateBranchPush(p)].filter(Boolean).join('\n') || null;
+  if (p.prMerge) return evaluatePrMerge(p);
   if (p.image) return evaluateImagePush(p);
   if (p.cargo) return evaluateCargo(p);
   if (p.release) return evaluateRelease(p);

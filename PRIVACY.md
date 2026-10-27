@@ -8,12 +8,12 @@ Nothing. shipsafe has no telemetry and sends no data to its author, to Anthropic
 
 ## Network use
 
-- The PreToolUse hook, `check` and `check-dir` make no network requests.
+- The PreToolUse hook, `check` and `check-dir` make no network requests. The `git` commands the hook runs for `askOnBranchPush` only read the local repository; the push itself is the command you or Claude run.
 - `verify`, `diff` (against a registry version) and `audit` contact only the registry the command targets (the npm registry or the one set by `publishConfig.registry`/`--registry`, PyPI, or the crates.io index). They send a package name and version and download public metadata and tarballs. They run only when you or a skill you started invoke them.
 
 ## What it reads locally
 
-To judge a publish or deploy, shipsafe reads, on your machine only: the Bash command Claude Code hands to the hook, the archive or build directory that command names, the packed `package.json`, `pyproject.toml` or `Cargo.toml`, the nearest on-disk `package.json` or `pyproject.toml` that configures an artifact, deploy config files that name an output directory (`wrangler.toml`/`wrangler.json`/`wrangler.jsonc`, `netlify.toml`, `firebase.json`, `.vercel/output`), and the nearest `.claude/shipsafe.json`. It never reads your conversation, Claude's memory, environment variables, registry tokens or OTPs.
+To judge a publish or deploy, shipsafe reads, on your machine only: the Bash command Claude Code hands to the hook, the archive or build directory that command names, the packed `package.json`, `pyproject.toml` or `Cargo.toml`, the nearest on-disk `package.json` or `pyproject.toml` that configures an artifact, deploy config files that name an output directory (`wrangler.toml`/`wrangler.json`/`wrangler.jsonc`, `netlify.toml`, `firebase.json`, `.vercel/output`), the nearest `.claude/shipsafe.json`, the `package.json` scripts, Makefile recipes and release-named shell scripts a command runs, and the CI files that decide whether a push releases (`.github/workflows/`, `bitbucket-pipelines.yml`). With the `askOnBranchPush` opt-in on, a `git push` to a deploy branch also reads, through local `git` commands, the files added or changed by the commits that push sends. It never reads your conversation, Claude's memory, environment variables, registry tokens or OTPs.
 
 ## What it stores locally, and for how long
 

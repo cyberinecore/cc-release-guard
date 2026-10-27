@@ -28,5 +28,8 @@ Every place where this plugin depends on Claude Code behaviour. `cc-plugin-compa
 | Plugin id form `<plugin>@<marketplace>` and the one-plugin-per-name rule | README.md | | install lines stop resolving, or a same-named copy silences the hooks |
 | marketplace.json keys `$schema`, `name`, `description`, `plugins[].name`, `plugins[].description` | .claude-plugin/marketplace.json | | `plugin validate --strict` fails on an unrecognized key |
 | Skill frontmatter `name` and `description` as auto-trigger wording for the model-invocable skills `help` and `release` | skills/help/SKILL.md, skills/release/SKILL.md | | the skills stop triggering, or trigger too often |
+| Implicit discovery of `hooks/hooks.json`: `plugin.json` names no hooks path | .claude-plugin/plugin.json, hooks/hooks.json | | the hooks stop loading unless `plugin.json` declares them |
+| Live hook check passes the prompt on stdin because `--allowedTools` is variadic and swallows a positional prompt | .claude/CLAUDE.md | | the check fails with "Input must be provided", or a flag change lets the prompt reach the session differently |
+| Skills run `node "${CLAUDE_PLUGIN_ROOT}/cli/shipsafe.mjs"` through the Bash tool, so `node` must be on PATH inside a sandboxed Bash (since 2.1.309 sandboxed Bash skips shell startup files) | skills/check/SKILL.md, skills/verify/SKILL.md, skills/init/SKILL.md | | a `node` provided only by an rc file (nvm) is missing and the skill's check fails |
 
-Last verified: 2.1.296 (Claude Code), 2026-10-11
+Last verified: 2.1.311 (Claude Code), 2026-10-27

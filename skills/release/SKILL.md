@@ -75,7 +75,7 @@ Prove the registry holds the checked file: `node "${CLAUDE_PLUGIN_ROOT}/cli/ship
 
 ## CI
 
-Run the same gate before any publish step, on the same file the publish step uploads. Add the CLI to the project's `devDependencies` at an exact version (`npm install --save-dev --save-exact @cyberinecore/shipsafe`), so `npm ci` installs the reviewed version from the lockfile:
+Run the same gate before any publish step, on the same file the publish step uploads. Add the CLI to the project's `devDependencies` from a release tag (`npm install --save-dev github:cyberinecore/cc-release-guard#v0.2.0`), so the lockfile pins the commit and `npm ci` installs exactly the reviewed code:
 
 ```sh
 npm ci

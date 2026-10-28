@@ -33,7 +33,7 @@ Report findings grouped by rule with the fix for each, and repeat until it passe
 
 ## 4. CI (offer; write it only when asked)
 
-Show the step that gates the same file CI publishes. It needs the CLI in the project's `devDependencies` at an exact version (`npm install --save-dev --save-exact @cyberinecore/shipsafe`), so `npm ci` installs the reviewed version from the lockfile:
+Show the step that gates the same file CI publishes. It needs the CLI in the project's `devDependencies` from a release tag (`npm install --save-dev github:cyberinecore/cc-release-guard#v0.2.0`), so the lockfile pins the commit and `npm ci` installs exactly the reviewed code:
 
 ```sh
 npm ci

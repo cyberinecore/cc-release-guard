@@ -2,7 +2,7 @@
 
 ![A package passes the ReleaseGuard gate while source files and keys are stopped before they ship](assets/banner.png)
 
-Cyberine ReleaseGuard (`cyberine-releaseguard`) is a Claude Code plugin, and `shipsafe` (npm `@cyberinecore/shipsafe`) is its standalone CLI; together they stop npm packages from shipping their source by accident. Claude Code's own npm package leaked its full source twice this way (an inline source map in February 2025, a 60 MB `cli.js.map` with `sourcesContent` in March 2026): the bundler emitted maps by default and nothing checked the tarball that was published.
+Cyberine ReleaseGuard (`cyberine-releaseguard`) is a Claude Code plugin, and `shipsafe` is its standalone CLI, installed from this repository's release tags; together they stop npm packages from shipping their source by accident. Claude Code's own npm package leaked its full source twice this way (an inline source map in February 2025, a 60 MB `cli.js.map` with `sourcesContent` in March 2026): the bundler emitted maps by default and nothing checked the tarball that was published.
 
 What it does not do: make JavaScript unreversable. Minified JS, and the JS embedded in a Bun single-file executable, stay readable with effort. shipsafe prevents accidental leaks and keeps the release process honest; logic that must stay secret belongs on a server.
 
@@ -63,13 +63,13 @@ claude plugin marketplace add cyberinecore/cc-release-guard
 claude plugin install cyberine-releaseguard@cyberine-releaseguard
 ```
 
-Official sources are only `github.com/cyberinecore/cc-release-guard` and the npm package `@cyberinecore/shipsafe`; anything under another owner is not this project.
+The only official source is `github.com/cyberinecore/cc-release-guard`; anything under another owner is not this project. The npm package `@cyberinecore/shipsafe` holds only the old 0.1.0 and is not updated: install from a release tag instead.
 
 The plugin needs Claude Code 2.1.139 or later, the first version with exec-form hooks (`args`); on an older Claude Code the hook does not run. The hook needs Node.js 18 or later on `PATH`. If `node` is missing, the hook errors and Claude Code carries on without it.
 
 ## Use in CI
 
-Add the CLI to the project's `devDependencies` at an exact version (`npm install --save-dev --save-exact @cyberinecore/shipsafe`), so `npm ci` installs the reviewed version from the lockfile, then gate the packed file:
+Add the CLI to the project's `devDependencies` from a release tag (`npm install --save-dev github:cyberinecore/cc-release-guard#v0.2.0`), so the lockfile pins the commit and `npm ci` installs exactly the reviewed code, then gate the packed file:
 
 ```sh
 npm ci

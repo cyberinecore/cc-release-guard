@@ -1,6 +1,6 @@
 # Privacy policy
 
-shipsafe is a Claude Code plugin and a CLI that run only on your computer. This policy covers the plugin and the npm package `@cyberinecore/shipsafe` as published from https://github.com/cyberinecore/cc-release-guard.
+shipsafe is a Claude Code plugin and a CLI that run only on your computer. This policy covers the plugin and the CLI as published from https://github.com/cyberinecore/cc-release-guard, and the older npm package `@cyberinecore/shipsafe`.
 
 ## What it collects
 

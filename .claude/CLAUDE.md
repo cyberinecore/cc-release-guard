@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-`shipsafe`: a Claude Code plugin plus a standalone npm CLI that stop npm packages from shipping source by accident (source maps, `sourcesContent`, TypeScript sources, `src/`/test paths, credential files, oversized files, storage-bucket URLs). It prevents accidental leaks; it does not make JS unreversable, and docs must never claim otherwise. It started with npm and now also gates wheels, sdists, crates, `.vsix`, `.asar`, `.nupkg`, `.jar`, `.gem`, Helm charts, container images and static deploys.
+`shipsafe`: a Claude Code plugin plus a standalone CLI that stop npm packages from shipping source by accident (source maps, `sourcesContent`, TypeScript sources, `src/`/test paths, credential files, oversized files, storage-bucket URLs). It prevents accidental leaks; it does not make JS unreversable, and docs must never claim otherwise. It started with npm and now also gates wheels, sdists, crates, `.vsix`, `.asar`, `.nupkg`, `.jar`, `.gem`, Helm charts, container images and static deploys.
 
 ## Commands
 
@@ -19,7 +19,7 @@ No build step and no dependencies: the CLI is one plain ESM file for Node 18+.
 
 ## Architecture
 
-The repo root is simultaneously the plugin root and a single-plugin marketplace (`.claude-plugin/marketplace.json` with `source: "./"`). The npm package is the `cli/` subdirectory only; the root `package.json` is `private` and exists for `npm test`.
+The repo root is simultaneously the plugin root and a single-plugin marketplace (`.claude-plugin/marketplace.json` with `source: "./"`). The CLI ships from git, not npm (user decision 2026-10-28: the npm package `@cyberinecore/shipsafe` stays at 0.1.0 and is not published again): the root `package.json` is `private` and carries `bin` + `files: ["cli/shipsafe.mjs"]`, so `npm install github:cyberinecore/cc-release-guard#vX.Y.Z` installs only the CLI. `cli/package.json` is kept for the dogfood check.
 
 `cli/shipsafe.mjs` is the single source of truth for both consumers:
 
@@ -47,6 +47,6 @@ Archive parsing is hand-written to stay zero-dependency: tar (gzip via `node:zli
 ## Plugin constraints
 
 - No top-level `bin/`: claude.ai and Cowork refuse a plugin that has one. The CLI lives in `cli/`.
-- `plugin.json` pins `version`; bump it on every release, together with `cli/package.json` and `VERSION` in `cli/shipsafe.mjs`. After the npm publish, tag the commit whose `cli/` files match the published tarball as `vX.Y.Z` and move the major tag (`v0`) there with `git tag -f -a` and `git push -f origin v0`: the README tells Action users to pin `@v0`, so each tag must run the same CLI as the npm version of that number.
+- `plugin.json` pins `version`; bump it on every release, together with the root `package.json`, `cli/package.json` and `VERSION` in `cli/shipsafe.mjs`. Tag the release commit as `vX.Y.Z` (the tag the install lines in README and the skills name) and move the major tag (`v0`) there with `git tag -f -a` and `git push -f origin v0`: the README tells Action users to pin `@v0`, so each tag must run the CLI of that version.
 - Skills are `release` (model-invocable; auto-triggers on publish intent), `init`, `check`, `verify`, `incident` (slash-only) and `help` (router, fires only with a shipsafe or releaseguard anchor), following the Cyberine ecosystem convention of `/<plugin>:<verb>`. The `release` skill stops before the publish command: the human runs it and types the OTP. Never add token storage or reading of token values.
 - Tests build real fixtures with `npm pack` in a temp dir; keep them that way rather than hand-crafting tar bytes.

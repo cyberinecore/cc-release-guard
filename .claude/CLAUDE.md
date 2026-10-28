@@ -19,7 +19,7 @@ No build step and no dependencies: the CLI is one plain ESM file for Node 18+.
 
 ## Architecture
 
-The repo root is simultaneously the plugin root and a single-plugin marketplace (`.claude-plugin/marketplace.json` with `source: "./"`). The CLI ships from git, not npm (user decision 2026-10-28: the npm package `@cyberinecore/shipsafe` stays at 0.1.0 and is not published again): the root `package.json` is `private` and carries `bin` + `files: ["cli/shipsafe.mjs"]`, so `npm install github:cyberinecore/cc-release-guard#vX.Y.Z` installs only the CLI. `cli/package.json` is kept for the dogfood check.
+The repo root is simultaneously the plugin root and a single-plugin marketplace (`.claude-plugin/marketplace.json` with `source: "./"`). The CLI ships from git tags and from npm as `@cyberinecore/shipsafe` (0.2.0 published 2026-10-28 by the owner with an OTP; the publish is always the owner's step): the root `package.json` is `private` and carries `bin` + `files: ["cli/shipsafe.mjs"]`, so `npm install github:cyberinecore/cc-release-guard#vX.Y.Z` installs only the CLI. `cli/package.json` is kept for the dogfood check.
 
 `cli/shipsafe.mjs` is the single source of truth for both consumers:
 

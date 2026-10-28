@@ -12,7 +12,7 @@ All notable changes to shipsafe. Versions follow `version` in `.claude-plugin/pl
 - Shell scripts named with `release`, `publish`, `deploy` or `ship`, or run with one of those verbs (`cf.sh deploy`), are read and scanned like an `npm run` body when run through `bash`, `sh`, `zsh` or by path.
 - `sensitive-file` also matches `.dev.vars*`, `*.tfstate`, `*.tfstate.backup`, `*.tfvars`, `kubeconfig`, `.kube/config`, `.docker/config.json`, `.ssh/`, `.mcp.json` and `.claude/settings.local.json`. New rule `data-file` for `*.sqlite`, `*.sqlite3`, `*.db`, `*.dump` and `.sql` files that hold rows, so fixtures can be allowed with a reason.
 - `secret-token` also matches GitLab `glpat-` tokens, SendGrid `SG.` keys and Azure storage `AccountKey=` values, formats confirmed against the vendors' documentation; placeholders and `EXAMPLE` suffixes are skipped as before. Hugging Face `hf_` and Google `GOCSPX-` were not added: neither vendor documents the token length.
-- The CLI is distributed from this repository's release tags (`npm install --save-dev github:cyberinecore/cc-release-guard#v0.2.0`, or the Action), no longer from npm: the root `package.json` gains `bin`, `files` and `version`. `@cyberinecore/shipsafe` on npm stays at 0.1.0.
+- The CLI is distributed from this repository's release tags (`npm install --save-dev github:cyberinecore/cc-release-guard#v0.2.0`, or the Action), as well as from npm as `@cyberinecore/shipsafe`: the root `package.json` gains `bin`, `files` and `version`.
 - `tests/coverage-probe.test.mjs`: 180 real publish, deploy and must-stay-silent commands, each also checked against the `if` filters in `hooks/hooks.json`.
 
 ## [0.1.0] - 2026-09-28

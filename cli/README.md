@@ -8,7 +8,7 @@ shipsafe prevents accidental leaks. It does not make JavaScript unreversable: lo
 
 ## Install
 
-Add it to `devDependencies` from a release tag of https://github.com/cyberinecore/cc-release-guard, so the lockfile pins the commit and `npm ci` installs exactly the reviewed code. The npm package `@cyberinecore/shipsafe` holds only the old 0.1.0 and is not updated.
+Add it to `devDependencies` from a release tag of https://github.com/cyberinecore/cc-release-guard, so the lockfile pins the commit and `npm ci` installs exactly the reviewed code. The same CLI is on npm as `@cyberinecore/shipsafe` (`npm install --save-dev --save-exact @cyberinecore/shipsafe`).
 
 ```sh
 npm install --save-dev github:cyberinecore/cc-release-guard#v0.2.0

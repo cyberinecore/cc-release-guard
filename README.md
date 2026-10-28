@@ -63,7 +63,7 @@ claude plugin marketplace add cyberinecore/cc-release-guard
 claude plugin install cyberine-releaseguard@cyberine-releaseguard
 ```
 
-The only official source is `github.com/cyberinecore/cc-release-guard`; anything under another owner is not this project. The npm package `@cyberinecore/shipsafe` holds only the old 0.1.0 and is not updated: install from a release tag instead.
+Official sources are only `github.com/cyberinecore/cc-release-guard` and the npm package `@cyberinecore/shipsafe`, which carries the same CLI (`npm install --save-dev --save-exact @cyberinecore/shipsafe`); anything under another owner is not this project.
 
 The plugin needs Claude Code 2.1.139 or later, the first version with exec-form hooks (`args`); on an older Claude Code the hook does not run. The hook needs Node.js 18 or later on `PATH`. If `node` is missing, the hook errors and Claude Code carries on without it.
 
